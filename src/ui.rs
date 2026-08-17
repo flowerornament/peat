@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 use indicatif::{ProgressBar, ProgressStyle};
 
 fn color_ok() -> bool {
-    std::env::var_os("NO_COLOR").is_none()
-        && std::env::var_os("TERM").is_none_or(|t| t != "dumb")
+    std::env::var_os("NO_COLOR").is_none() && std::env::var_os("TERM").is_none_or(|t| t != "dumb")
 }
 
 // Stream capability cannot change within a process, and the style helpers
@@ -231,12 +230,12 @@ pub fn page(text: &str) {
             .args(["-RFX"])
             .stdin(std::process::Stdio::piped())
             .spawn()
-        {
-            if let Some(stdin) = p.stdin.as_mut() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = p.wait();
-            return;
+    {
+        if let Some(stdin) = p.stdin.as_mut() {
+            let _ = stdin.write_all(text.as_bytes());
         }
+        let _ = p.wait();
+        return;
+    }
     print!("{text}");
 }

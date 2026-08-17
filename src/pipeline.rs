@@ -207,9 +207,7 @@ pub fn obs_row(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, ObsRow>> {
 /// exists, rebuild this view from the evidence Multimap instead.
 pub fn subj_step(acc: &mut SubjStats, v: &ObsRow, delta: isize) {
     acc.count += delta as i64;
-    if delta > 0
-        && (v.ts_ms, v.seq) >= (acc.last_ms, acc.last_seq)
-    {
+    if delta > 0 && (v.ts_ms, v.seq) >= (acc.last_ms, acc.last_seq) {
         acc.text = v.text.clone();
         acc.last_ms = v.ts_ms;
         acc.last_seq = v.seq;
@@ -259,7 +257,7 @@ pub fn sess_step(acc: &mut SessStats, e: &Envelope, delta: isize) {
 #[macro_export]
 macro_rules! peat_pipeline {
     () => {{
-        use fold::pipeline::{terminal, Aggregate, FilterMap, Map};
+        use fold::pipeline::{Aggregate, FilterMap, Map, terminal};
         use $crate::pipeline as p;
         (
             FilterMap::new(

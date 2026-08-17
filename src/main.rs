@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use event::{Envelope, Event, EventId, OBS_SEQ_BASE};
-use pipeline::{ObsRow, SessStats, SubjStats, DAY_MS};
+use pipeline::{DAY_MS, ObsRow, SessStats, SubjStats};
 use ui::{age_label, clip, short_sess};
 
 /// Shared row filters for the verbs that walk indexed text or the ledger.
@@ -203,21 +203,23 @@ fn now_ms() -> u64 {
 /// type contains closures and cannot be named.
 macro_rules! make_brief {
     ($st:expr, $query:expr, $now:expr, $budget:expr) => {
-        $st.rtx(|(days, files, (kw, vec, texts), (subjects, evidence), sessions, _ledger)| {
-            brief::assemble(
-                $query,
-                $now,
-                $budget,
-                &days,
-                &files,
-                |q, n| kw.search(q, n),
-                |v| vec.search(v),
-                |id| texts.get(id),
-                &subjects,
-                &evidence,
-                &sessions,
-            )
-        })
+        $st.rtx(
+            |(days, files, (kw, vec, texts), (subjects, evidence), sessions, _ledger)| {
+                brief::assemble(
+                    $query,
+                    $now,
+                    $budget,
+                    &days,
+                    &files,
+                    |q, n| kw.search(q, n),
+                    |v| vec.search(v),
+                    |id| texts.get(id),
+                    &subjects,
+                    &evidence,
+                    &sessions,
+                )
+            },
+        )
     };
 }
 
@@ -228,7 +230,10 @@ pub fn subject_handle_pub(name: &str) -> String {
 }
 
 fn subject_handle(name: &str) -> String {
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
         format!("▸ peat {name}")
     } else {
         format!("▸ peat recall --subject {name:?}")
@@ -237,8 +242,12 @@ fn subject_handle(name: &str) -> String {
 
 /// The brief's band budget: flag beats env beats default.
 fn band_budget(flag: Option<usize>) -> usize {
-    flag.or_else(|| std::env::var("PEAT_BRIEF_BUDGET").ok().and_then(|v| v.parse().ok()))
-        .unwrap_or(8)
+    flag.or_else(|| {
+        std::env::var("PEAT_BRIEF_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
+    .unwrap_or(8)
 }
 
 fn main() {
@@ -260,11 +269,13 @@ fn main() {
         None => {
             let q = &cli.query;
             let now_bucket = now_ms() / DAY_MS;
-            let is_sess = |s: &str| {
-                s.len() >= 6 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-            };
+            let is_sess =
+                |s: &str| s.len() >= 6 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
             if q.len() == 1 && ladder::parse_window(&q[0], now_bucket).is_some() {
-                Cmd::Zoom { window: q[0].clone(), json: cli.json }
+                Cmd::Zoom {
+                    window: q[0].clone(),
+                    json: cli.json,
+                }
             } else if is_sess(&q[0])
                 && (q.len() == 1 || (q.len() == 2 && q[1].parse::<u32>().is_ok()))
             {
@@ -273,9 +284,7 @@ fn main() {
                     seq: q.get(1).and_then(|s| s.parse().ok()),
                 }
             } else if q.len() == 1
-                && st.rtx(|(_, _, _, (subjects, _), _, _)| {
-                    subjects.get(&q[0]).is_some() as bool
-                })
+                && st.rtx(|(_, _, _, (subjects, _), _, _)| subjects.get(&q[0]).is_some())
             {
                 // an exact subject name reads its full evidence trail —
                 // the expansion path every clipped belief line points at
@@ -410,8 +419,7 @@ beside the shared db); pass --session",
                     subjects
                         .iter()
                         .filter(|(s, _): &(String, SubjStats)| {
-                            s != &subject
-                                && (s.contains(&subject) || subject.contains(s.as_str()))
+                            s != &subject && (s.contains(&subject) || subject.contains(s.as_str()))
                         })
                         .map(|(s, v)| format!("{s} ({} obs)", v.count))
                         .take(4)
@@ -496,17 +504,15 @@ consider splitting into separate observations",
                 .into_iter()
                 .filter_map(|(id, score)| {
                     let t = texts.get(&id)?;
-                    filter
-                        .matches(now, &id.0, &t.kind, t.ts_ms)
-                        .then(|| Hit {
-                            score: (score * 1000.0).round() / 1000.0,
-                            kind: t.kind,
-                            cited: t.cited,
-                            age: age_label(now, t.ts_ms),
-                            session: short_sess(&id.0),
-                            seq: id.1,
-                            text: t.text,
-                        })
+                    filter.matches(now, &id.0, &t.kind, t.ts_ms).then(|| Hit {
+                        score: (score * 1000.0).round() / 1000.0,
+                        kind: t.kind,
+                        cited: t.cited,
+                        age: age_label(now, t.ts_ms),
+                        session: short_sess(&id.0),
+                        seq: id.1,
+                        text: t.text,
+                    })
                 })
                 .take(limit)
                 .collect()
@@ -517,7 +523,11 @@ consider splitting into separate observations",
                 println!("{}", ui::dim(&format!("no hits for {query:?}")));
             } else {
                 for h in &hits {
-                    let cited = if h.kind == "obs" && h.cited { "·cited" } else { "" };
+                    let cited = if h.kind == "obs" && h.cited {
+                        "·cited"
+                    } else {
+                        ""
+                    };
                     println!(
                         "  {} {} {}",
                         ui::dim(&format!("[{}{} · {}]", h.kind, cited, h.age)),
@@ -591,7 +601,7 @@ consider splitting into separate observations",
             } else {
                 for (name, s) in subj {
                     println!(
-                        "  {} {} {}",
+                        "  {} {} {}  {}",
                         ui::accent(&name),
                         ui::dim(&format!(
                             "({} obs{}, {}):",
@@ -599,11 +609,8 @@ consider splitting into separate observations",
                             if s.cited { "" } else { ", uncited" },
                             age_label(now, s.last_ms)
                         )),
-                        format!(
-                            "{}  {}",
-                            clip(&s.text, 120),
-                            ui::dim(&subject_handle(&name))
-                        )
+                        clip(&s.text, 120),
+                        ui::dim(&subject_handle(&name))
                     );
                 }
             }
@@ -637,11 +644,14 @@ consider splitting into separate observations",
                 };
                 let place = s.cwd.rsplit('/').next().unwrap_or(&s.cwd);
                 // branch is noise when it restates the worktree name
-                let branch = (!s.branch.is_empty()
+                let branch = if !s.branch.is_empty()
                     && !s.branch.ends_with(place)
-                    && !place.ends_with(s.branch.as_str()))
-                .then(|| format!(" · {}", s.branch))
-                .unwrap_or_default();
+                    && !place.ends_with(s.branch.as_str())
+                {
+                    format!(" · {}", s.branch)
+                } else {
+                    String::new()
+                };
                 println!(
                     "{} {}",
                     ui::h1(&format!("== session {} ==", short_sess(&sess))),
@@ -653,7 +663,11 @@ consider splitting into separate observations",
                     ))
                 );
                 if !s.final_msg.is_empty() {
-                    println!("\n{}\n  {}", ui::h1("closing message:"), clip(&s.final_msg, 400));
+                    println!(
+                        "\n{}\n  {}",
+                        ui::h1("closing message:"),
+                        clip(&s.final_msg, 400)
+                    );
                 }
                 if !obs.is_empty() {
                     println!("\n{}", ui::h1("observations:"));
@@ -663,13 +677,20 @@ consider splitting into separate observations",
                             ui::dim(&format!(
                                 "[{subj} · {}{}]",
                                 age_label(now, r.ts_ms),
-                                if r.derived_from.is_empty() { "" } else { " · cited" }
+                                if r.derived_from.is_empty() {
+                                    ""
+                                } else {
+                                    " · cited"
+                                }
                             )),
                             r.text
                         );
                     }
                 }
-                println!("\n{}", ui::dim(&format!("▸ peat events --session {}", short_sess(&sess))));
+                println!(
+                    "\n{}",
+                    ui::dim(&format!("▸ peat events --session {}", short_sess(&sess)))
+                );
                 return;
             };
             let (hit, citing) = st.rtx(|(_, _, _, (subjects, evidence), sessions, ledger)| {
@@ -750,18 +771,27 @@ consider splitting into separate observations",
                     }
                     obs_rows.sort_by_key(|(_, r)| r.ts_ms);
                     let head = ladder::digest(
-                        &day_rows, &obs_per_day, start, end,
-                        label.clone(), String::new(), String::new(),
+                        &day_rows,
+                        &obs_per_day,
+                        start,
+                        end,
+                        label.clone(),
+                        String::new(),
+                        String::new(),
                     );
                     let kids: Vec<ladder::Band> = ladder::children(start, end)
                         .into_iter()
-                        .map(|(s, e, l, h)| ladder::digest(&day_rows, &obs_per_day, s, e, l, String::new(), h))
+                        .map(|(s, e, l, h)| {
+                            ladder::digest(&day_rows, &obs_per_day, s, e, l, String::new(), h)
+                        })
                         .filter(|b| b.tools + b.commits + b.obs > 0)
                         .collect();
                     // sessions overlapping the window, newest first
                     let mut sess_rows: Vec<(String, SessStats)> = sessions
                         .iter()
-                        .filter(|(_, s): &(String, SessStats)| s.start_ms < hi_ms && s.end_ms >= lo_ms)
+                        .filter(|(_, s): &(String, SessStats)| {
+                            s.start_ms < hi_ms && s.end_ms >= lo_ms
+                        })
                         .collect();
                     sess_rows.sort_by_key(|(_, s)| std::cmp::Reverse(s.end_ms));
                     // lane B from the ledger mirror: what was said, verbatim
@@ -803,7 +833,11 @@ consider splitting into separate observations",
                 );
                 return;
             }
-            let fails = if head.fails > 0 { format!(" ({} fail)", head.fails) } else { String::new() };
+            let fails = if head.fails > 0 {
+                format!(" ({} fail)", head.fails)
+            } else {
+                String::new()
+            };
             let span = {
                 let s = ladder::Civil::from_bucket(start);
                 let e = ladder::Civil::from_bucket(end);
@@ -811,23 +845,49 @@ consider splitting into separate observations",
             };
             println!(
                 "{} {}",
-                ui::h1(&format!("== {label}{} ==", if label.contains(' ') || span.is_empty() { String::new() } else { format!(" · {span}") })),
+                ui::h1(&format!(
+                    "== {label}{} ==",
+                    if label.contains(' ') || span.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {span}")
+                    }
+                )),
                 ui::dim(&format!(
                     "{} tools{fails} · {} commits · {} sessions{}",
-                    ui::knum(head.tools), head.commits, sess_rows.len(),
-                    if head.obs > 0 { format!(" · {} obs", head.obs) } else { String::new() }
+                    ui::knum(head.tools),
+                    head.commits,
+                    sess_rows.len(),
+                    if head.obs > 0 {
+                        format!(" · {} obs", head.obs)
+                    } else {
+                        String::new()
+                    }
                 ))
             );
             if !kids.is_empty() {
                 println!("\n{}", ui::h1("within:"));
                 for b in &kids {
-                    let f = if b.fails > 0 { format!(" ({} fail)", b.fails) } else { String::new() };
-                    let files = if b.files.is_empty() { String::new() } else { format!(" · {}", b.files.join(", ")) };
+                    let f = if b.fails > 0 {
+                        format!(" ({} fail)", b.fails)
+                    } else {
+                        String::new()
+                    };
+                    let files = if b.files.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", b.files.join(", "))
+                    };
                     println!(
                         "  {} {} tools{f} · {} commits{}{files}  {}",
                         ui::dim(&format!("[{}]", b.label)),
-                        ui::knum(b.tools), b.commits,
-                        if b.obs > 0 { format!(" · {} obs", b.obs) } else { String::new() },
+                        ui::knum(b.tools),
+                        b.commits,
+                        if b.obs > 0 {
+                            format!(" · {} obs", b.obs)
+                        } else {
+                            String::new()
+                        },
                         ui::dim(&format!("▸ {}", b.handle)),
                     );
                 }
@@ -849,7 +909,11 @@ consider splitting into separate observations",
                 for (id, ts, t) in &finals {
                     println!(
                         "  {} {}",
-                        ui::dim(&format!("[{} · {}]", short_sess(&id.0), age_label(now, *ts))),
+                        ui::dim(&format!(
+                            "[{} · {}]",
+                            short_sess(&id.0),
+                            age_label(now, *ts)
+                        )),
                         clip(t, 180)
                     );
                 }
@@ -862,7 +926,11 @@ consider splitting into separate observations",
                         ui::dim(&format!(
                             "[{subj} · {}{}]",
                             age_label(now, r.ts_ms),
-                            if r.derived_from.is_empty() { "" } else { " · cited" }
+                            if r.derived_from.is_empty() {
+                                ""
+                            } else {
+                                " · cited"
+                            }
                         )),
                         clip(&r.text, 160)
                     );
@@ -953,7 +1021,11 @@ fn print_subject(subj: &str, head: Option<SubjStats>, rows: &[ObsRow], now: u64,
                 "[{} · {}{}]",
                 short_sess(&r.session),
                 age_label(now, r.ts_ms),
-                if r.derived_from.is_empty() { "" } else { " · cited" }
+                if r.derived_from.is_empty() {
+                    ""
+                } else {
+                    " · cited"
+                }
             )),
             r.text
         );

@@ -15,15 +15,12 @@ use std::collections::BTreeMap;
 use fold::stream::KeyedStream;
 
 use crate::event::{Envelope, Event, EventId, OBS_SEQ_BASE};
-use crate::pipeline::{DayStats, SubjStats, DAY_MS};
+use crate::pipeline::{DAY_MS, DayStats, SubjStats};
 
 fn tmp() -> std::path::PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "peat-test-{}-{n}.db",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("peat-test-{}-{n}.db", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -102,11 +99,21 @@ fn retraction_makes_old_text_unfindable() {
     let control = ("s1".to_string(), OBS_SEQ_BASE + 1);
 
     st.wtx(|tx| {
-        tx.upsert(&id, &obs("s1", 0, 1000, "staging", "runs on the raspberry pi").1);
+        tx.upsert(
+            &id,
+            &obs("s1", 0, 1000, "staging", "runs on the raspberry pi").1,
+        );
         // control: keeps carrying the old text so vector-nearest is decidable
         tx.upsert(
             &control,
-            &obs("s1", 1, 1000, "hardware", "a raspberry pi lives under the desk").1,
+            &obs(
+                "s1",
+                1,
+                1000,
+                "hardware",
+                "a raspberry pi lives under the desk",
+            )
+            .1,
         );
     });
     assert!(
@@ -150,7 +157,10 @@ fn retraction_oracle_is_red_capable() {
     let mut st = open!(&path);
     let id = ("s1".to_string(), OBS_SEQ_BASE);
     st.wtx(|tx| {
-        tx.upsert(&id, &obs("s1", 0, 1000, "staging", "runs on the raspberry pi").1);
+        tx.upsert(
+            &id,
+            &obs("s1", 0, 1000, "staging", "runs on the raspberry pi").1,
+        );
     });
     st.wtx(|tx| {
         tx.upsert(&id, &obs("s1", 0, 2000, "staging", "moved to a cloud vm").1);
@@ -189,12 +199,10 @@ fn ledger() -> Vec<(EventId, Envelope)> {
 
 /// What the views must contain after folding `prefix`, computed by an
 /// independent plain scan (no fold involved).
-fn predict(
-    prefix: &[(EventId, Envelope)],
-) -> (
-    BTreeMap<u64, (i64, i64)>,
-    BTreeMap<String, (String, i64, (u64, u32))>,
-) {
+type DayPrediction = BTreeMap<u64, (i64, i64)>;
+type SubjPrediction = BTreeMap<String, (String, i64, (u64, u32))>;
+
+fn predict(prefix: &[(EventId, Envelope)]) -> (DayPrediction, SubjPrediction) {
     let mut days: BTreeMap<u64, (i64, i64)> = BTreeMap::new(); // day -> (tools, fails)
     // subject -> (text, count, (last_ms, last_seq))
     let mut subj: BTreeMap<String, (String, i64, (u64, u32))> = BTreeMap::new();
@@ -239,9 +247,7 @@ fn replay_prefix_matches_independent_prediction() {
                 .collect();
             let s: BTreeMap<String, (String, i64, (u64, u32))> = subjects
                 .iter()
-                .map(|(k, v): (String, SubjStats)| {
-                    (k, (v.text, v.count, (v.last_ms, v.last_seq)))
-                })
+                .map(|(k, v): (String, SubjStats)| (k, (v.text, v.count, (v.last_ms, v.last_seq))))
                 .collect();
             (d, s)
         });
@@ -309,7 +315,9 @@ fn equal_timestamp_obs_resolve_by_seq() {
             );
         });
         let text = st.rtx(|(_, _, _, (subjects, _), _, _)| {
-            subjects.get(&"staging".to_string()).map(|s: SubjStats| s.text)
+            subjects
+                .get(&"staging".to_string())
+                .map(|s: SubjStats| s.text)
         });
         assert_eq!(text.as_deref(), Some("second claim"));
     }
@@ -349,10 +357,14 @@ fn prefix_fold_reconstructs_past_beliefs() {
     });
     let (then, now) = (
         past.rtx(|(_, _, _, (subjects, _), _, _)| {
-            subjects.get(&"staging".to_string()).map(|s: SubjStats| s.text)
+            subjects
+                .get(&"staging".to_string())
+                .map(|s: SubjStats| s.text)
         }),
         full.rtx(|(_, _, _, (subjects, _), _, _)| {
-            subjects.get(&"staging".to_string()).map(|s: SubjStats| s.text)
+            subjects
+                .get(&"staging".to_string())
+                .map(|s: SubjStats| s.text)
         }),
     );
     assert_eq!(then.as_deref(), Some("on the raspberry pi"));
@@ -418,10 +430,12 @@ not even json
 "#;
     let parsed = crate::transcript::parse(weird, None).unwrap();
     assert_eq!(parsed.session, "sX");
-    assert!(parsed
-        .events
-        .iter()
-        .any(|(_, e)| matches!(&e.kind, Event::UserMsg { text } if text == "hello")));
+    assert!(
+        parsed
+            .events
+            .iter()
+            .any(|(_, e)| matches!(&e.kind, Event::UserMsg { text } if text == "hello"))
+    );
 }
 
 #[test]
@@ -450,13 +464,25 @@ fn codex_rollout_parses_and_unknown_rejected() {
     assert_eq!(parsed.session, "cdx-1");
     let count = |f: fn(&Event) -> bool| parsed.events.iter().filter(|(_, e)| f(&e.kind)).count();
     assert_eq!(count(|e| matches!(e, Event::SessionMeta { .. })), 1);
-    assert_eq!(count(|e| matches!(e, Event::UserMsg { .. })), 1, "developer role must be skipped");
+    assert_eq!(
+        count(|e| matches!(e, Event::UserMsg { .. })),
+        1,
+        "developer role must be skipped"
+    );
     assert_eq!(count(|e| matches!(e, Event::ToolCall { .. })), 1);
-    assert_eq!(count(|e| matches!(e, Event::Commit { .. })), 1, "jj describe detected");
+    assert_eq!(
+        count(|e| matches!(e, Event::Commit { .. })),
+        1,
+        "jj describe detected"
+    );
     assert_eq!(count(|e| matches!(e, Event::Compaction {})), 1);
     assert_eq!(count(|e| matches!(e, Event::CompactSummary { .. })), 1);
     assert_eq!(count(|e| matches!(e, Event::FinalMsg { .. })), 1);
-    assert_eq!(count(|e| matches!(e, Event::Said { .. })), 0, "sole assistant msg became FinalMsg");
+    assert_eq!(
+        count(|e| matches!(e, Event::Said { .. })),
+        0,
+        "sole assistant msg became FinalMsg"
+    );
 
     // unknown format: reject, never guess
     let unknown = r#"{"kind":"mystery","data":1}

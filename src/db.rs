@@ -117,8 +117,10 @@ where
         let _ = std::fs::create_dir_all(parent);
         let marker = parent.join(".gitignore");
         if !marker.exists() {
-            let _ = std::fs::write(&marker, "*
-");
+            let _ = std::fs::write(
+                &marker, "*
+",
+            );
         }
     }
 

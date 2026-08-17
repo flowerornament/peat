@@ -66,3 +66,5 @@
 # - github.token    → use GITHUB_TOKEN env var instead
 
 sync.remote: "file:///Users/morgan/.local/share/beads-remotes/peat"
+
+federation.remote: "file:///Users/morgan/.local/share/beads-remotes/peat"

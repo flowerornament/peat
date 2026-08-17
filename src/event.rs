@@ -50,27 +50,44 @@ pub enum Event {
         ese_version: String,
     },
     /// What the user asked. Truncated to [`USER_MSG_CAP`].
-    UserMsg { text: String },
+    UserMsg {
+        text: String,
+    },
     /// One tool invocation. `detail` is the command line / file path,
     /// truncated to [`DETAIL_CAP`].
-    ToolCall { tool: String, detail: String, ok: bool },
+    ToolCall {
+        tool: String,
+        detail: String,
+        ok: bool,
+    },
     /// A file mutated via Edit/Write/NotebookEdit.
-    FileTouch { path: String },
-    Commit { hash: String, message: String },
+    FileTouch {
+        path: String,
+    },
+    Commit {
+        hash: String,
+        message: String,
+    },
     /// The agent's closing message — a free session summary.
-    FinalMsg { text: String },
+    FinalMsg {
+        text: String,
+    },
     Compaction {},
 
     /// A substantive assistant message mid-session — where conclusions
     /// live ("the fix is X", "root cause was Y"). Keyword-indexed for
     /// recall; not embedded (volume). Added in v2; additive, so v1
     /// envelopes still parse.
-    Said { text: String },
+    Said {
+        text: String,
+    },
 
     /// The compactor's own distillation of a context window it replaced —
     /// the closest thing to an observation compaction can produce, kept
     /// verbatim and recallable. Added in v2; additive.
-    CompactSummary { text: String },
+    CompactSummary {
+        text: String,
+    },
 
     // ---- the one judgment step ----
     /// A small claim the agent chose to record. `derived_from` cites the
@@ -137,7 +154,12 @@ impl Event {
             | Event::Said { text }
             | Event::CompactSummary { text } => one(text),
             Event::ToolCall { tool, detail, ok } => {
-                format!("{}{} {}", tool, if *ok { "" } else { " FAILED" }, one(detail))
+                format!(
+                    "{}{} {}",
+                    tool,
+                    if *ok { "" } else { " FAILED" },
+                    one(detail)
+                )
             }
             Event::FileTouch { path } => one(path),
             Event::Commit { hash, message } => {

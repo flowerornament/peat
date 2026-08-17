@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 
-use fold::pipeline::terminal::{MultimapReader, TableReader};
 use fold::pipeline::Scored;
+use fold::pipeline::terminal::{MultimapReader, TableReader};
 use fold::stream::Readable;
 
 use crate::event::EventId;
 use crate::ladder;
-use crate::pipeline::{DayStats, ObsRow, SessStats, SubjStats, TextRow, DAY_MS};
+use crate::pipeline::{DAY_MS, DayStats, ObsRow, SessStats, SubjStats, TextRow};
 use crate::transcript::{date_label, local_offset_ms};
 use crate::ui::{self, age_label, short_path, short_sess};
 
@@ -76,8 +76,7 @@ pub fn assemble<R: Readable>(
     // Rung 0 is the materialized day table; the bands are a pure read-time
     // regrouping of it (obs counted from the evidence trail — the judged
     // lane is small). Frontier = the digest's oldest shown day.
-    let all_days: std::collections::BTreeMap<u64, DayStats> =
-        day_rows.iter().cloned().collect();
+    let all_days: std::collections::BTreeMap<u64, DayStats> = day_rows.iter().cloned().collect();
     let mut obs_per_day: std::collections::BTreeMap<u64, i64> = Default::default();
     for (subject, _) in subjects.iter() {
         for r in evidence.get(&subject) {
@@ -85,12 +84,10 @@ pub fn assemble<R: Readable>(
             *obs_per_day.entry(r.ts_ms / DAY_MS).or_default() += 1;
         }
     }
-    let frontier = day_rows
-        .iter()
-        .take(3)
-        .last()
-        .map(|(d, _)| *d)
-        .unwrap_or(today_bucket);
+    let frontier = match day_rows.len() {
+        0 => today_bucket,
+        n => day_rows[n.min(3) - 1].0,
+    };
     let further = ladder::bands(&all_days, &obs_per_day, frontier, budget);
     let days_out: Vec<serde_json::Value> = day_rows
         .iter()
@@ -163,7 +160,10 @@ pub fn assemble<R: Readable>(
     // ---- relevant: hybrid RRF over the text indexes, disposition inline
     let mut relevant: Vec<serde_json::Value> = Vec::new();
     if !query.trim().is_empty() {
-        let fused = rrf(&kw_search(query, 12), &vec_search(&ese::encode_single(query)));
+        let fused = rrf(
+            &kw_search(query, 12),
+            &vec_search(&ese::encode_single(query)),
+        );
         let mut per_session: HashMap<String, usize> = HashMap::new();
         for (id, _) in fused {
             if relevant.len() >= 6 {

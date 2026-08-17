@@ -1,16 +1,24 @@
 [package]
 name = "peat"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
+description = "Agent memory as a fold: an append-forever session ledger with incrementally materialized recall"
+repository = "https://github.com/flowerornament/peat"
+license = "MIT"
 publish = false
 
+# fold/ese/anny live in the bogkit fork (upstream PR: flowercomputers/bogkit#18).
+# Pinned by rev — bump deliberately; repoint to upstream if/when the PR merges.
 [dependencies]
-anny = { path = "../../anny" }
-ese = { path = "../../ese", features = ["dim-512", "quant-8"] }
-fold = { path = "../../fold" }
+anny = { git = "https://github.com/flowerornament/bogkit", rev = "328e9a11c20f653193c7bd1c77981733226a6397" }
+ese = { git = "https://github.com/flowerornament/bogkit", rev = "328e9a11c20f653193c7bd1c77981733226a6397", features = ["dim-512", "quant-8"] }
+fold = { git = "https://github.com/flowerornament/bogkit", rev = "328e9a11c20f653193c7bd1c77981733226a6397" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 minijinja = "2"
-indicatif = "0.18.6"
-console = "0.16.4"
+indicatif = "0.18"
+console = "0.16"
+
+[profile.dev]
+opt-level = 3

@@ -27,7 +27,7 @@
 use serde_json::Value;
 
 use crate::event::{
-    cap, Envelope, Event, EventId, DETAIL_CAP, FINAL_MSG_CAP, SAID_CAP, SAID_MIN, USER_MSG_CAP,
+    DETAIL_CAP, Envelope, Event, EventId, FINAL_MSG_CAP, SAID_CAP, SAID_MIN, USER_MSG_CAP, cap,
 };
 
 /// Blocks per transcript line the seq scheme can address.
@@ -103,25 +103,24 @@ pub fn parse(jsonl: &str, fallback_session: Option<&str>) -> Option<Parsed> {
         last_ts = ts;
 
         // one SessionMeta from the first line that carries cwd
-        if !meta_done
-            && let Some(cwd) = line.get("cwd").and_then(Value::as_str) {
-                meta_done = true;
-                events.push((
-                    (session.clone(), seq0),
-                    Envelope::new(
-                        &session,
-                        ts,
-                        Event::SessionMeta {
-                            cwd: cwd.to_string(),
-                            branch: line
-                                .get("gitBranch")
-                                .and_then(Value::as_str)
-                                .map(String::from),
-                            ese_version: crate::event::ese_version(),
-                        },
-                    ),
-                ));
-            }
+        if !meta_done && let Some(cwd) = line.get("cwd").and_then(Value::as_str) {
+            meta_done = true;
+            events.push((
+                (session.clone(), seq0),
+                Envelope::new(
+                    &session,
+                    ts,
+                    Event::SessionMeta {
+                        cwd: cwd.to_string(),
+                        branch: line
+                            .get("gitBranch")
+                            .and_then(Value::as_str)
+                            .map(String::from),
+                        ese_version: crate::event::ese_version(),
+                    },
+                ),
+            ));
+        }
 
         if line.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
             events.push((
@@ -249,22 +248,19 @@ pub fn parse(jsonl: &str, fallback_session: Option<&str>) -> Option<Parsed> {
                             }
                         }
                         Some("tool_result") => {
-                            let err = block.get("is_error").and_then(Value::as_bool)
-                                == Some(true)
+                            let err = block.get("is_error").and_then(Value::as_bool) == Some(true)
                                 || line
                                     .get("toolUseResult")
                                     .and_then(|r| r.get("is_error"))
                                     .and_then(Value::as_bool)
                                     == Some(true);
                             if err
-                                && let Some(id) =
-                                    block.get("tool_use_id").and_then(Value::as_str)
-                                    && let Some(&i) = call_sites.get(id)
-                                        && let Event::ToolCall { ok, .. } =
-                                            &mut events[i].1.kind
-                                        {
-                                            *ok = false;
-                                        }
+                                && let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
+                                && let Some(&i) = call_sites.get(id)
+                                && let Event::ToolCall { ok, .. } = &mut events[i].1.kind
+                            {
+                                *ok = false;
+                            }
                         }
                         _ => {}
                     }
@@ -369,7 +365,12 @@ pub fn override_final_msg(parsed: &mut Parsed, text: &str) {
     parsed
         .events
         .retain(|(_, e)| !matches!(e.kind, Event::FinalMsg { .. }));
-    let ts = parsed.events.iter().map(|(_, e)| e.ts_ms).max().unwrap_or(0);
+    let ts = parsed
+        .events
+        .iter()
+        .map(|(_, e)| e.ts_ms)
+        .max()
+        .unwrap_or(0);
     parsed.events.push((
         (parsed.session.clone(), crate::event::HOOK_FINAL_SEQ),
         Envelope::new(
@@ -606,7 +607,10 @@ fn parse_codex(lines: &[Value], fallback_session: Option<&str>) -> Option<Parsed
                                 .and_then(Value::as_str)
                                 .map(String::from)
                         });
-                    let detail = cmd.clone().or_else(|| args.map(String::from)).unwrap_or_default();
+                    let detail = cmd
+                        .clone()
+                        .or_else(|| args.map(String::from))
+                        .unwrap_or_default();
                     events.push((
                         (session.clone(), seq),
                         Envelope::new(

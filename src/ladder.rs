@@ -40,7 +40,11 @@ impl Civil {
         let mp = (5 * doy + 2) / 153;
         let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
         let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-        Civil { y: yoe + era * 400 + i64::from(m <= 2), m, d }
+        Civil {
+            y: yoe + era * 400 + i64::from(m <= 2),
+            m,
+            d,
+        }
     }
 
     pub fn bucket(self) -> u64 {
@@ -71,7 +75,11 @@ impl Civil {
     }
 
     fn quarter_start(self) -> Civil {
-        Civil { m: (self.m - 1) / 3 * 3 + 1, d: 1, ..self }
+        Civil {
+            m: (self.m - 1) / 3 * 3 + 1,
+            d: 1,
+            ..self
+        }
     }
 }
 
@@ -83,9 +91,23 @@ pub fn span_label(s: Civil, e: Civil) -> String {
     if (s.y, s.m) == (e.y, e.m) {
         format!("{} {}–{}", MONTHS[s.m as usize - 1], s.d, e.d)
     } else if s.y == e.y {
-        format!("{} {} – {} {}", MONTHS[s.m as usize - 1], s.d, MONTHS[e.m as usize - 1], e.d)
+        format!(
+            "{} {} – {} {}",
+            MONTHS[s.m as usize - 1],
+            s.d,
+            MONTHS[e.m as usize - 1],
+            e.d
+        )
     } else {
-        format!("{} {} {} – {} {} {}", MONTHS[s.m as usize - 1], s.d, s.y, MONTHS[e.m as usize - 1], e.d, e.y)
+        format!(
+            "{} {} {} – {} {} {}",
+            MONTHS[s.m as usize - 1],
+            s.d,
+            s.y,
+            MONTHS[e.m as usize - 1],
+            e.d,
+            e.y
+        )
     }
 }
 
@@ -216,9 +238,11 @@ pub fn bands(
             2 | 3 => {
                 let start = c.month_start().bucket();
                 let clipped = start < oldest || c.d < 28;
-                let span = clipped
-                    .then(|| span_label(Civil::from_bucket(start.max(oldest)), c))
-                    .unwrap_or_default();
+                let span = if clipped {
+                    span_label(Civil::from_bucket(start.max(oldest)), c)
+                } else {
+                    String::new()
+                };
                 (
                     start,
                     MONTHS[c.m as usize - 1].to_string(),
@@ -229,11 +253,21 @@ pub fn bands(
             4 | 5 => {
                 let start = c.quarter_start().bucket();
                 let q = (c.m - 1) / 3 + 1;
-                (start, format!("q{q}"), String::new(), format!("peat {}-q{q}", c.y))
+                (
+                    start,
+                    format!("q{q}"),
+                    String::new(),
+                    format!("peat {}-q{q}", c.y),
+                )
             }
             _ => {
                 let start = Civil { y: c.y, m: 1, d: 1 }.bucket();
-                (start, format!("{}", c.y), String::new(), format!("peat {}", c.y))
+                (
+                    start,
+                    format!("{}", c.y),
+                    String::new(),
+                    format!("peat {}", c.y),
+                )
             }
         };
         let start = start.max(oldest);
@@ -273,16 +307,20 @@ pub fn parse_window(s: &str, now_bucket: u64) -> Option<(u64, u64, String)> {
         return Some((s1, e2, format!("{l1} – {l2}")));
     }
     let now = Civil::from_bucket(now_bucket);
-    let clamp = |start: u64, end: u64, label: String| {
-        (start, end.min(now_bucket), label)
-    };
+    let clamp = |start: u64, end: u64, label: String| (start, end.min(now_bucket), label);
     // YYYY-MM-DD / YYYY-MM / YYYY
     let parts: Vec<&str> = s.split('-').collect();
-    let all_num = parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    let all_num = parts
+        .iter()
+        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
     if all_num {
         match parts.as_slice() {
             [y, m, d] if y.len() == 4 => {
-                let c = Civil { y: y.parse().ok()?, m: m.parse().ok()?, d: d.parse().ok()? };
+                let c = Civil {
+                    y: y.parse().ok()?,
+                    m: m.parse().ok()?,
+                    d: d.parse().ok()?,
+                };
                 (1..=12).contains(&c.m).then_some(())?;
                 let b = c.bucket();
                 return Some((b, b, format!("{} {}", MONTHS[c.m as usize - 1], c.d)));
@@ -291,13 +329,31 @@ pub fn parse_window(s: &str, now_bucket: u64) -> Option<(u64, u64, String)> {
                 let (y, m): (i64, u32) = (y.parse().ok()?, m.parse().ok()?);
                 (1..=12).contains(&m).then_some(())?;
                 let start = Civil { y, m, d: 1 };
-                let next = if m == 12 { Civil { y: y + 1, m: 1, d: 1 } } else { Civil { y, m: m + 1, d: 1 } };
-                return Some(clamp(start.bucket(), next.bucket() - 1, format!("{} {y}", MONTHS[m as usize - 1])));
+                let next = if m == 12 {
+                    Civil {
+                        y: y + 1,
+                        m: 1,
+                        d: 1,
+                    }
+                } else {
+                    Civil { y, m: m + 1, d: 1 }
+                };
+                return Some(clamp(
+                    start.bucket(),
+                    next.bucket() - 1,
+                    format!("{} {y}", MONTHS[m as usize - 1]),
+                ));
             }
             [y] if y.len() == 4 => {
                 let y: i64 = y.parse().ok()?;
                 let start = Civil { y, m: 1, d: 1 }.bucket();
-                let end = Civil { y: y + 1, m: 1, d: 1 }.bucket() - 1;
+                let end = Civil {
+                    y: y + 1,
+                    m: 1,
+                    d: 1,
+                }
+                .bucket()
+                    - 1;
                 return Some(clamp(start, end, format!("{y}")));
             }
             _ => return None,
@@ -305,7 +361,9 @@ pub fn parse_window(s: &str, now_bucket: u64) -> Option<(u64, u64, String)> {
     }
     // [YYYY-]wNN and [YYYY-]qN
     let (year, tail) = match parts.as_slice() {
-        [y, t] if y.len() == 4 && y.bytes().all(|b| b.is_ascii_digit()) => (Some(y.parse::<i64>().ok()?), *t),
+        [y, t] if y.len() == 4 && y.bytes().all(|b| b.is_ascii_digit()) => {
+            (Some(y.parse::<i64>().ok()?), *t)
+        }
         [t] => (None, *t),
         _ => return None,
     };
@@ -318,7 +376,11 @@ pub fn parse_window(s: &str, now_bucket: u64) -> Option<(u64, u64, String)> {
         let start = week1_mon + (n as u64 - 1) * 7;
         if year.is_none() && start > now_bucket {
             // bare wNN in january referring to last year's tail
-            let jan4 = Civil { y: y - 1, m: 1, d: 4 };
+            let jan4 = Civil {
+                y: y - 1,
+                m: 1,
+                d: 4,
+            };
             let start = jan4.bucket() - jan4.weekday() as u64 + (n as u64 - 1) * 7;
             return Some(clamp(start, start + 6, format!("w{n}")));
         }
@@ -330,8 +392,24 @@ pub fn parse_window(s: &str, now_bucket: u64) -> Option<(u64, u64, String)> {
         if year.is_none() && n > (now.m - 1) / 3 + 1 {
             y -= 1; // bare qN later than the current quarter → last year's
         }
-        let start = Civil { y, m: (n - 1) * 3 + 1, d: 1 };
-        let end = if n == 4 { Civil { y: y + 1, m: 1, d: 1 } } else { Civil { y, m: n * 3 + 1, d: 1 } };
+        let start = Civil {
+            y,
+            m: (n - 1) * 3 + 1,
+            d: 1,
+        };
+        let end = if n == 4 {
+            Civil {
+                y: y + 1,
+                m: 1,
+                d: 1,
+            }
+        } else {
+            Civil {
+                y,
+                m: n * 3 + 1,
+                d: 1,
+            }
+        };
         return Some(clamp(start.bucket(), end.bucket() - 1, format!("q{n} {y}")));
     }
     None
@@ -348,7 +426,12 @@ pub fn children(start: u64, end: u64) -> Vec<(u64, u64, String, String)> {
     if days <= 7 {
         for b in start..=end {
             let c = Civil::from_bucket(b);
-            out.push((b, b, format!("{} {}", MONTHS[c.m as usize - 1], c.d), format!("peat {:04}-{:02}-{:02}", c.y, c.m, c.d)));
+            out.push((
+                b,
+                b,
+                format!("{} {}", MONTHS[c.m as usize - 1], c.d),
+                format!("peat {:04}-{:02}-{:02}", c.y, c.m, c.d),
+            ));
         }
     } else if days <= 31 {
         let mut b = start;
@@ -358,16 +441,38 @@ pub fn children(start: u64, end: u64) -> Vec<(u64, u64, String, String)> {
             let (wy, wn) = c.iso_week();
             let s = Civil::from_bucket(b);
             let e = Civil::from_bucket(wk_end);
-            out.push((b, wk_end, format!("w{wn} · {} {}–{}", MONTHS[s.m as usize - 1], s.d, e.d), format!("peat {wy}-w{wn}")));
+            out.push((
+                b,
+                wk_end,
+                format!("w{wn} · {} {}–{}", MONTHS[s.m as usize - 1], s.d, e.d),
+                format!("peat {wy}-w{wn}"),
+            ));
             b = wk_end + 1;
         }
     } else {
         let mut b = start;
         while b <= end {
             let c = Civil::from_bucket(b).month_start();
-            let next = if c.m == 12 { Civil { y: c.y + 1, m: 1, d: 1 } } else { Civil { y: c.y, m: c.m + 1, d: 1 } };
+            let next = if c.m == 12 {
+                Civil {
+                    y: c.y + 1,
+                    m: 1,
+                    d: 1,
+                }
+            } else {
+                Civil {
+                    y: c.y,
+                    m: c.m + 1,
+                    d: 1,
+                }
+            };
             let m_end = (next.bucket() - 1).min(end);
-            out.push((b, m_end, format!("{} {}", MONTHS[c.m as usize - 1], c.y), format!("peat {:04}-{:02}", c.y, c.m)));
+            out.push((
+                b,
+                m_end,
+                format!("{} {}", MONTHS[c.m as usize - 1], c.y),
+                format!("peat {:04}-{:02}", c.y, c.m),
+            ));
             b = m_end + 1;
         }
     }
@@ -379,7 +484,10 @@ mod tests {
     use super::*;
 
     fn day(tools: i64) -> DayStats {
-        DayStats { tools, ..Default::default() }
+        DayStats {
+            tools,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -388,7 +496,11 @@ mod tests {
             assert_eq!(Civil::from_bucket(b).bucket(), b);
         }
         // 2026-08-17 is a Monday
-        let c = Civil { y: 2026, m: 8, d: 17 };
+        let c = Civil {
+            y: 2026,
+            m: 8,
+            d: 17,
+        };
         assert_eq!(c.weekday(), 0);
         assert_eq!(c.iso_week().1, 34);
     }
@@ -396,7 +508,12 @@ mod tests {
     #[test]
     fn bands_tile_the_past_exactly() {
         let mut rows = BTreeMap::new();
-        let today = Civil { y: 2026, m: 8, d: 17 }.bucket();
+        let today = Civil {
+            y: 2026,
+            m: 8,
+            d: 17,
+        }
+        .bucket();
         let oldest = today - 400;
         for b in (oldest..=today).step_by(3) {
             rows.insert(b, day(10));
@@ -416,7 +533,12 @@ mod tests {
     #[test]
     fn budget_changes_reslice_only() {
         let mut rows = BTreeMap::new();
-        let today = Civil { y: 2026, m: 8, d: 17 }.bucket();
+        let today = Civil {
+            y: 2026,
+            m: 8,
+            d: 17,
+        }
+        .bucket();
         for b in (today - 700..=today).step_by(2) {
             rows.insert(b, day(1));
         }
@@ -430,15 +552,34 @@ mod tests {
 
     #[test]
     fn window_grammar() {
-        let now = Civil { y: 2026, m: 8, d: 17 }.bucket();
+        let now = Civil {
+            y: 2026,
+            m: 8,
+            d: 17,
+        }
+        .bucket();
         let (s, e, _) = parse_window("2026-08-14", now).unwrap();
         assert_eq!(s, e);
         let (s, e, _) = parse_window("w33", now).unwrap();
         assert_eq!(e - s, 6);
         assert_eq!(Civil::from_bucket(s).weekday(), 0);
         let (s, e, _) = parse_window("2026-07", now).unwrap();
-        assert_eq!(Civil::from_bucket(s), Civil { y: 2026, m: 7, d: 1 });
-        assert_eq!(Civil::from_bucket(e), Civil { y: 2026, m: 7, d: 31 });
+        assert_eq!(
+            Civil::from_bucket(s),
+            Civil {
+                y: 2026,
+                m: 7,
+                d: 1
+            }
+        );
+        assert_eq!(
+            Civil::from_bucket(e),
+            Civil {
+                y: 2026,
+                m: 7,
+                d: 31
+            }
+        );
         let (_, e, _) = parse_window("q3", now).unwrap();
         assert_eq!(e, now, "current quarter clamps at now");
         assert!(parse_window("fold", now).is_none());
@@ -449,7 +590,12 @@ mod tests {
     #[test]
     fn dominance_filter_on_band_files() {
         let mut rows = BTreeMap::new();
-        let today = Civil { y: 2026, m: 8, d: 17 }.bucket();
+        let today = Civil {
+            y: 2026,
+            m: 8,
+            d: 17,
+        }
+        .bucket();
         let mut s = day(5);
         s.files.insert("src/a/dominant.rs".into(), 30);
         s.files.insert("src/a/minor1.rs".into(), 2);
