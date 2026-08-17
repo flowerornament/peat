@@ -490,3 +490,35 @@ fn codex_rollout_parses_and_unknown_rejected() {
 "#;
     assert!(crate::transcript::parse(unknown, Some("s")).is_none());
 }
+
+/// The capture-cursor fast path must be invisible in the ledger: parsing
+/// from a skip point yields exactly the suffix of a full parse — same ids,
+/// same envelopes — so cursor + overlap + idempotent upserts converge to
+/// the cold-capture state.
+#[test]
+fn parse_from_matches_full_parse_suffix() {
+    let jsonl = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/transcript-nx-rs-planread.jsonl"
+    ))
+    .unwrap();
+    let full = crate::transcript::parse(&jsonl, None).unwrap();
+    for skip in [1usize, 10, 30] {
+        let tail = crate::transcript::parse_from(&jsonl, None, skip).unwrap();
+        assert_eq!(tail.session, full.session);
+        let cut = (skip as u32) * 16;
+        let expect: Vec<_> = full
+            .events
+            .iter()
+            .filter(|((_, seq), _)| *seq >= cut && *seq < crate::event::HOOK_FINAL_SEQ)
+            .map(|(id, e)| (id.clone(), serde_json::to_string(&e.kind).unwrap()))
+            .collect();
+        let got: Vec<_> = tail
+            .events
+            .iter()
+            .filter(|((_, seq), _)| *seq >= cut && *seq < crate::event::HOOK_FINAL_SEQ)
+            .map(|(id, e)| (id.clone(), serde_json::to_string(&e.kind).unwrap()))
+            .collect();
+        assert_eq!(got, expect, "skip={skip} diverged from full-parse suffix");
+    }
+}

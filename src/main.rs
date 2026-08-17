@@ -321,7 +321,29 @@ fn main() {
                 ui::error(&format!("cannot read {}", transcript.display()));
                 std::process::exit(1);
             };
-            let Some(mut parsed) = transcript::parse(&jsonl, session.as_deref()) else {
+            // capture cursor: transcripts are append-only and seq is a pure
+            // function of the raw line index, so the already-ingested prefix
+            // is skipped without JSON-parsing it — hooks re-capture on every
+            // stop, and a long session must not pay O(whole transcript) each
+            // time. Backed off by an overlap margin (tool_use/result pairs
+            // can straddle the boundary); idempotent upserts absorb overlap.
+            // A missing or stale-low cursor degrades to a full parse.
+            const CURSOR_MARGIN: usize = 200;
+            let cursor_path = transcript.file_stem().map(|stem| {
+                db::db_path()
+                    .parent()
+                    .unwrap_or(&db::db_path())
+                    .join("cursor")
+                    .join(stem)
+            });
+            let skip = cursor_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(0)
+                .saturating_sub(CURSOR_MARGIN);
+            let total_lines = jsonl.lines().count();
+            let Some(mut parsed) = transcript::parse_from(&jsonl, session.as_deref(), skip) else {
                 ui::error("no session id found; pass --session");
                 std::process::exit(1);
             };
@@ -339,6 +361,10 @@ fn main() {
             // every subsequent open replays the whole journal, which after a
             // bulk backfill dominates brief latency
             st.checkpoint();
+            if let Some(p) = &cursor_path {
+                let _ = std::fs::create_dir_all(p.parent().unwrap());
+                let _ = std::fs::write(p, total_lines.to_string());
+            }
             phase.done();
             ui::note(&format!(
                 "captured {n} events from session {}",

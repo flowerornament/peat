@@ -60,19 +60,52 @@ fn detect(lines: &[Value]) -> Option<Format> {
 }
 
 pub fn parse(jsonl: &str, fallback_session: Option<&str>) -> Option<Parsed> {
-    let lines: Vec<Value> = jsonl
+    parse_from(jsonl, fallback_session, 0)
+}
+
+/// Parse only from raw line `skip` on — the capture-cursor fast path.
+/// Transcripts are append-only and seq is a pure function of the raw line
+/// index, so the already-ingested prefix needs no JSON parsing at all;
+/// format and session id still come from the head. Callers pass a skip
+/// backed off by an overlap margin, and idempotent upserts absorb the
+/// overlap.
+pub fn parse_from(jsonl: &str, fallback_session: Option<&str>, skip: usize) -> Option<Parsed> {
+    let head: Vec<Value> = jsonl
         .lines()
         .filter(|l| !l.trim().is_empty())
+        .take(8)
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
-    match detect(&lines) {
-        Some(Format::CodexRollout) => return parse_codex(&lines, fallback_session),
+    // the SessionMeta source is the first cwd-carrying line; when it lies in
+    // the skipped prefix it is already in the ledger and must not be re-minted
+    // at a different seq. A substring scan of the prefix costs no JSON parsing.
+    let meta_in_prefix = skip > 0 && jsonl.lines().take(skip).any(|l| l.contains("\"cwd\""));
+    let lines: Vec<(usize, Value)> = jsonl
+        .lines()
+        .enumerate()
+        .filter(|(i, l)| *i >= skip && !l.trim().is_empty())
+        .filter_map(|(i, l)| serde_json::from_str(l).ok().map(|v| (i, v)))
+        .collect();
+    match detect(&head) {
+        Some(Format::CodexRollout) => {
+            // codex carries its session only in the rollout header
+            let head_session = head
+                .iter()
+                .find(|l| l.get("type").and_then(Value::as_str) == Some("session_meta"))
+                .and_then(|l| l.get("payload")?.get("session_id")?.as_str())
+                .map(str::to_string);
+            return parse_codex(
+                &lines,
+                head_session.as_deref().or(fallback_session),
+                meta_in_prefix,
+            );
+        }
         Some(Format::ClaudeCode) => {}
         None => {
             // fallback_session lets an empty/unrecognized file still resolve
             // for Claude-style parsing of nothing; a nonempty unknown format
             // must fail loudly
-            if !lines.is_empty() {
+            if !head.is_empty() {
                 return None;
             }
         }
@@ -80,7 +113,7 @@ pub fn parse(jsonl: &str, fallback_session: Option<&str>) -> Option<Parsed> {
 
     let session = lines
         .iter()
-        .find_map(|v| v.get("sessionId").and_then(Value::as_str))
+        .find_map(|(_, v)| v.get("sessionId").and_then(Value::as_str))
         .or(fallback_session)?
         .to_string();
 
@@ -89,11 +122,11 @@ pub fn parse(jsonl: &str, fallback_session: Option<&str>) -> Option<Parsed> {
     // tool_use id -> index into `events`, to mark `ok: false` when the
     // matching tool_result reports an error
     let mut call_sites: std::collections::HashMap<String, usize> = Default::default();
-    let mut meta_done = false;
+    let mut meta_done = meta_in_prefix;
     // borrowed until the end of the loop; capped exactly once when kept
     let mut final_msg: Option<(u32, u64, &str)> = None;
 
-    for (li, line) in lines.iter().enumerate() {
+    for (li, line) in lines.iter().map(|(i, v)| (*i, v)) {
         let seq0 = (li as u32) * SEQ_STRIDE;
         let ts = line
             .get("timestamp")
@@ -455,20 +488,24 @@ pub fn local_day_ms(date: &str, time: &str) -> Option<u64> {
 /// `function_call` and `custom_tool_call` are both ToolCalls with the
 /// command extracted from the arguments JSON when present; `compacted`
 /// yields the marker plus the compactor's own summary text.
-fn parse_codex(lines: &[Value], fallback_session: Option<&str>) -> Option<Parsed> {
+fn parse_codex(
+    lines: &[(usize, Value)],
+    fallback_session: Option<&str>,
+    meta_in_prefix: bool,
+) -> Option<Parsed> {
     let session = lines
         .iter()
-        .find(|l| l.get("type").and_then(Value::as_str) == Some("session_meta"))
-        .and_then(|l| l.get("payload")?.get("session_id")?.as_str())
+        .find(|(_, l)| l.get("type").and_then(Value::as_str) == Some("session_meta"))
+        .and_then(|(_, l)| l.get("payload")?.get("session_id")?.as_str())
         .or(fallback_session)?
         .to_string();
 
     let mut events: Vec<(EventId, Envelope)> = Vec::new();
     let mut last_ts: u64 = 0;
-    let mut meta_done = false;
+    let mut meta_done = meta_in_prefix;
     let mut final_msg: Option<(u32, u64, &str)> = None;
 
-    for (li, line) in lines.iter().enumerate() {
+    for (li, line) in lines.iter().map(|(i, v)| (*i, v)) {
         let seq = (li as u32) * SEQ_STRIDE + 2;
         let ts = line
             .get("timestamp")
