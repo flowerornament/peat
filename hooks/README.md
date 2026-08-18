@@ -110,20 +110,22 @@ covers it:
 | moment | hook | mechanical | judged |
 |---|---|---|---|
 | session begins | `SessionStart` | brief injected as context; session id written | — |
+| first user prompt | `UserPromptSubmit` | — | invisible `additionalContext` nudge: deposit at natural completion points (once per session) |
 | a commit lands | `PostToolUse` (Bash: `git commit`/`jj describe`/`just land`) | — | nudge: deposit an obs |
-| first stop of the session | `Stop` | capture (`--final-msg` authoritative) | **block once**: deposit 1–3 obs while context is hot |
-| every later stop | `Stop` | capture | silent (marker file `.peat/prompted-<session>`) |
+| every stop | `Stop` | capture (`--final-msg` authoritative) | — (never blocks) |
 | context about to compact | `PreCompact` | salvage capture | — |
 | session resumes after compact | `SessionStart` (`source: compact`) | brief | nudge: deposit from the compact summary |
 | `/clear` or other non-Stop ending | `SessionEnd` | salvage capture | — (the session is gone) |
 
 Two behaviors worth knowing:
 
-- **The block hides the reply.** Claude Code renders a `decision:block` by
-  hiding the response the agent just wrote ("1 message hidden"). The reason
-  text compensates: it tells the agent to *restate that reply in full* after
-  depositing, not merely acknowledge the hook. This is a rendering
-  limitation we work around in prose.
+- **peat never blocks.** A blocking Stop hook — exit 2 or `decision:block` —
+  renders as a `hook error`, force-continues the turn, and displaces the
+  reply the user was reading: it is enforcement machinery, wrong for
+  soliciting judgment. Every peat prompt travels as `additionalContext`
+  (invisible to the user, weighed by the agent in flow): the commit nudge,
+  the post-compact nudge, and the once-per-session deposit reminder at the
+  first user prompt. If the user can notice a hook, it is the wrong channel.
 - **Codex parity.** Codex (≥0.147) supports the same hook set and stdin
   contract, including `decision:block` — snippets port with a
   transcript-path fallback over `~/.codex/sessions/rollout-*.jsonl`. One
