@@ -101,14 +101,39 @@ Stored text is capped (`UserMsg` 2 KB, `FinalMsg` 8 KB, tool detail 500 B) at
 char boundaries. `--json` output always carries full stored text; clipping is
 display-only.
 
-## Build
+## Install
 
-Part of the bogkit cargo workspace:
+**curl** (prebuilt binaries: macOS arm64, Linux x86_64/arm64):
 
 ```console
-$ cargo build -p peat        # first build downloads the ese model (build.rs) — slow once
-$ cargo test  -p peat        # 8 tests; one #[ignore]d twin is SUPPOSED to fail when run
+$ curl -fsSL https://raw.githubusercontent.com/flowerornament/peat/main/install.sh | bash
 ```
+
+**nix** (sandboxed build; the ese embedding model is pinned as fixed-output
+derivations):
+
+```console
+$ nix run github:flowerornament/peat -- brief
+```
+
+or as a flake input with the home-manager module:
+
+```nix
+inputs.peat.url = "github:flowerornament/peat?ref=refs/heads/release";
+# ...
+programs.peat.enable = true;
+```
+
+**from source** (first build downloads the ese model — slow once):
+
+```console
+$ cargo build --release
+$ cargo test              # one #[ignore]d twin is SUPPOSED to fail when run
+```
+
+fold/ese/anny arrive as git dependencies pinned by rev to the
+[bogkit fork](https://github.com/flowerornament/bogkit) (upstream PR
+flowercomputers/bogkit#18).
 
 ## Usage
 

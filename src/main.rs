@@ -65,6 +65,7 @@ impl Filter {
 #[derive(Parser)]
 #[command(
     name = "peat",
+    version,
     about = "agent memory as a fold",
     long_about = "agent memory as a fold\n\n\
 Sessions deposit events into one append-forever ledger; every readable\n\
