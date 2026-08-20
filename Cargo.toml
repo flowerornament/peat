@@ -1,6 +1,6 @@
 [package]
 name = "peat"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Agent memory as a fold: an append-forever session ledger with incrementally materialized recall"
 repository = "https://github.com/flowerornament/peat"

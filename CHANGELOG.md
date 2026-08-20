@@ -2,6 +2,25 @@
 
 All notable changes to peat. The ledger is the API to our past; so is this file.
 
+## 0.2.0 — 2026-08-20
+
+- **Observations carry their basis, not just their age.** Every `peat obs`
+  now stamps the repo state it was deposited against — commit hash of
+  `HEAD` in the depositor's cwd plus a dirty-tree flag — by construction,
+  with no opt-in surface to forget. Subjects, brief, evidence trails, and
+  recall hits render the anchor inline (`@abc1234+ · ~4 commits since`;
+  `+` means the tree was dirty), so a durable rule is distinguishable
+  from a snapshot that has since rotted. The commits-since figure is a
+  read-time join over the day table — no git and no wall clock in any
+  read path. Event schema is now v3 (`Obs2`); every pre-v3 observation
+  parses forever and renders unanchored.
+- **Views rebuild themselves.** First contact with this version replays
+  the ledger through the new pipeline automatically (view schema v2); the
+  previous database is kept one generation back at `db.old`. One-time,
+  silent, and the ledger is untouched. **Do not open a migrated database
+  with an older peat** — roll back by restoring `db.old` if you must
+  downgrade.
+
 ## 0.1.1 — 2026-08-19
 
 - **Hooks doctrine: peat never blocks.** The documented Stop hook now
