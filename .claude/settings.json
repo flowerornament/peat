@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); { [ -n \"$tp\" ] \u0026\u0026 peat capture \"$tp\"; } 2\u003e/dev/null || true",
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); { [ -n \"$tp\" ] && peat capture \"$tp\"; } 2>/dev/null || true",
             "type": "command"
           }
         ]
@@ -14,7 +14,7 @@
       {
         "hooks": [
           {
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); { [ -n \"$tp\" ] \u0026\u0026 peat capture \"$tp\"; } 2\u003e/dev/null; exit 0",
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); { [ -n \"$tp\" ] && peat capture \"$tp\"; } 2>/dev/null; exit 0",
             "type": "command"
           }
         ]
@@ -24,7 +24,7 @@
       {
         "hooks": [
           {
-            "command": "in=$(cat); mkdir -p .peat; printf '%s' \"$in\" | jq -r '.session_id' \u003e .peat/current-session 2\u003e/dev/null; peat brief 2\u003e/dev/null || true; src=$(printf '%s' \"$in\" | jq -r '.source // empty'); if [ \"$src\" = \"compact\" ]; then echo \"\"; echo \"peat: context was just compacted — if durable knowledge from before the compaction is not yet deposited, do it now from the summary: peat obs \u003csubject\u003e \\\"\u003cone-line claim\u003e\\\"\"; fi; exit 0",
+            "command": "in=$(cat); mkdir -p .peat; printf '%s' \"$in\" | jq -r '.session_id' > .peat/current-session 2>/dev/null; peat brief 2>/dev/null || true; src=$(printf '%s' \"$in\" | jq -r '.source // empty'); if [ \"$src\" = \"compact\" ]; then echo \"\"; echo \"peat: context was just compacted \u2014 if durable knowledge from before the compaction is not yet deposited, do it now from the summary: peat obs <subject> \\\"<one-line claim>\\\"\"; fi; exit 0",
             "type": "command"
           }
         ]
@@ -43,8 +43,29 @@
       {
         "hooks": [
           {
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); act=$(printf '%s' \"$in\" | jq -r '.stop_hook_active // false'); sid=$(printf '%s' \"$in\" | jq -r '.session_id // empty'); { [ -n \"$tp\" ] \u0026\u0026 peat capture \"$tp\" --final-msg \"$fm\"; } 2\u003e/dev/null; mk=.peat/prompted-\"$sid\"; if [ \"$act\" != \"true\" ] \u0026\u0026 [ -n \"$sid\" ] \u0026\u0026 [ ! -f \"$mk\" ]; then touch \"$mk\"; printf '{\"decision\":\"block\",\"reason\":\"peat: before finishing — if this session produced durable knowledge, deposit 1-3 observations now: peat obs \u003csubject\u003e \\\\\"\u003cone-line claim\u003e\\\\\" [--from seq,seq]. This prompt fires once per session and HIDES the reply you just wrote from the user. After depositing (or if nothing durable was learned), RESTATE that reply in full — do not just acknowledge this prompt.\"}'; fi; exit 0",
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); act=$(printf '%s' \"$in\" | jq -r '.stop_hook_active // false'); sid=$(printf '%s' \"$in\" | jq -r '.session_id // empty'); { [ -n \"$tp\" ] && peat capture \"$tp\" --final-msg \"$fm\"; } 2>/dev/null; mk=.peat/prompted-\"$sid\"; if [ \"$act\" != \"true\" ] && [ -n \"$sid\" ] && [ ! -f \"$mk\" ]; then touch \"$mk\"; printf '{\"decision\":\"block\",\"reason\":\"peat: before finishing \u2014 if this session produced durable knowledge, deposit 1-3 observations now: peat obs <subject> \\\\\"<one-line claim>\\\\\" [--from seq,seq]. This prompt fires once per session and HIDES the reply you just wrote from the user. After depositing (or if nothing durable was learned), RESTATE that reply in full \u2014 do not just acknowledge this prompt.\"}'; fi; exit 0",
             "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "in=$(cat); sid=$(printf '%s' \"$in\" | jq -r '.session_id // empty'); mk=.peat/nudged-\"$sid\"; if [ -n \"$sid\" ] && [ ! -f \"$mk\" ]; then mkdir -p .peat; touch \"$mk\"; printf %s \"{\\\"additionalContext\\\": \\\"peat is recording this session. At natural completion points \\\\u2014 a commit, a finished task \\\\u2014 deposit durable knowledge: peat obs <subject> \\\\\\\"<one-line claim>\\\\\\\" [--from seq,seq]. Read a belief trail with: peat <subject>.\\\"}\"; fi; exit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "in=$(cat); cmd=$(printf '%s' \"$in\" | jq -r '.tool_input.command // empty'); case \"$cmd\" in *'git commit'*|*'jj describe'*|*'just land'*) printf '{\"additionalContext\":\"a commit landed \u2014 deposit peat obs <subject> \\\\\"<one-line claim>\\\\\" for anything durable learned this change\"}' ;; esac; exit 0"
           }
         ]
       }
