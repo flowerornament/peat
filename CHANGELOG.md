@@ -2,6 +2,22 @@
 
 All notable changes to peat. The ledger is the API to our past; so is this file.
 
+## 0.1.1 — 2026-08-19
+
+- **Hooks doctrine: peat never blocks.** The documented Stop hook now
+  captures silently instead of blocking with a deposit prompt (a blocking
+  Stop renders as a hook error and displaces the agent's reply); the
+  observation solicitation moved to an invisible once-per-session
+  `additionalContext` at the first user prompt. If you installed hooks
+  from 0.1.0's docs, update your Stop hook to the new snippet in
+  `hooks/README.md`.
+- **Pre-alpha notice** at the top of the README, plus post-split link
+  fixes.
+- **Release machinery**: `just release-bump` / `release-verify` /
+  `release` / `release-notes`, backed by a self-testing
+  `scripts/release.py` (ported from nx-rs/anneal, jj-aware, no tag
+  without full verification).
+
 ## 0.1.0 — 2026-08-18
 
 First release, three days after the first commit — built and dogfooded live

@@ -35,17 +35,18 @@ land bookmark="main":
     if [ -n "$(jj git remote list)" ]; then jj git push -b "$b"
     else echo "land: no git remote — bookmark moved, push skipped" >&2; fi
 
-# Cut a release: verify versions + changelog, gate, tag, push, move `release`
+# Set the release version in Cargo.toml/Cargo.lock/flake.nix + scaffold CHANGELOG
+release-bump version:
+    python3 scripts/release.py bump {{ quote(version) }}
+
+# Release readiness checks without tagging (self-tests the machinery first)
+release-verify:
+    python3 scripts/release.py verify
+
+# Cut a release: verify everything, tag main, push, move `release` — CI publishes
 release version:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    v="{{ version }}"
-    grep -q "^version = \"$v\"" Cargo.toml || { echo "Cargo.toml version != $v" >&2; exit 2; }
-    grep -q "peatVersion = \"$v\"" flake.nix || { echo "flake.nix peatVersion != $v" >&2; exit 2; }
-    grep -q "^## $v" CHANGELOG.md || { echo "CHANGELOG.md has no '## $v' section" >&2; exit 2; }
-    [ -z "$(jj log --no-graph -r '@ & ~empty()' -T commit_id)" ] || { echo "working copy not empty — land first" >&2; exit 2; }
-    just check
-    git tag -a "v$v" -m "peat v$v" main
-    git push origin "v$v"
-    git push origin main:release --force-with-lease
-    echo "released v$v — release branch moved; CI publishes binaries"
+    python3 scripts/release.py tag {{ quote(version) }}
+
+# Preview the CHANGELOG entry CI will publish as GitHub release notes
+release-notes version:
+    python3 scripts/release.py notes {{ quote(version) }}
