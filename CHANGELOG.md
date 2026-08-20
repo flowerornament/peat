@@ -7,7 +7,7 @@ are copied config, and you must re-sync them from `hooks/README.md` by
 hand. The snippet stamp there (`hooks snippet vN · date`) tells you which
 version you carry.
 
-## Unreleased
+## 0.2.1 — 2026-08-20
 
 - **Hooks: full-coverage snippets + Codex parity confirmed.** The
   documented snippets (stamp: v3 · 2026-08-20) now cover all six moments —
