@@ -148,6 +148,16 @@ fold/ese/anny arrive as git dependencies pinned by rev to the
 [bogkit fork](https://github.com/flowerornament/bogkit) (upstream PR
 flowercomputers/bogkit#18).
 
+**Then install the hooks — they are the product.** peat without hooks is a
+CLI you must remember to run; the fabric (brief on wake, capture on stop,
+deposit nudges) is entirely the hooks. Copy the stamped snippets from
+[`hooks/README.md`](hooks/README.md) into `.claude/settings.json` (Claude
+Code) and/or `.codex/hooks.json` (Codex) in each project that should
+remember. Hooks are config you own, not something the binary manages:
+**when you upgrade peat, check the CHANGELOG for `Hooks:` entries** — they
+mean your installed snippets need re-syncing by hand. This is deliberate;
+there is no auto-install.
+
 ## Usage
 
 The learnable surface is two verbs; everything else is reachable from their
@@ -272,21 +282,25 @@ which is why the result is the truth of that day and not a reconstruction.
   cannot rebuild — except observations, which live only in the ledger. Back
   up the ledger, not the views.
 
-## Claude Code integration
+## Agent integration (Claude Code & Codex)
 
-Hook contract, snippets, and caveats live in [`hooks/README.md`](hooks/README.md).
-The shape:
+Hook contract, stamped snippets, and the update story live in
+[`hooks/README.md`](hooks/README.md). The six-moment shape:
 
 | hook | does |
 |---|---|
-| `SessionStart` | writes `.peat/current-session`, runs `peat brief` — **stdout is injected into the session's context** |
-| `Stop` | `peat capture` with `--final-msg` from `last_assistant_message`; then blocks **once** (guarded by `stop_hook_active`) asking the agent to deposit 1–3 observations while its context is still hot |
-| `PreCompact` | salvage capture before the context window is replaced |
+| `SessionStart` | writes `.peat/current-session`, runs `peat brief` — **stdout is injected into the session's context**; after a compaction, nudges deposit-from-summary |
+| `UserPromptSubmit` | once per session, invisible `additionalContext` nudge: deposit at natural completion points |
 | `PostToolUse` (Bash) | on `git commit`/`jj describe`/`just land`, nudges the agent (via `additionalContext`) to deposit an obs |
+| `Stop` | `peat capture` with `--final-msg` from `last_assistant_message` — **never blocks** |
+| `PreCompact` | salvage capture before the context window is replaced |
+| `SessionEnd` | salvage capture on `/clear` and other non-Stop endings |
 
-Two contract facts worth repeating: hooks receive **stdin JSON** (there are
-no `$CLAUDE_TRANSCRIPT_PATH`-style env vars), and every hook command must end
-`|| true` — peat failing may never break a session.
+Codex ≥0.148 supports the same hook set and stdin contract; its snippet
+(one Stop fallback difference) is in `hooks/README.md`. Two contract facts
+worth repeating: hooks receive **stdin JSON** (there are no
+`$CLAUDE_TRANSCRIPT_PATH`-style env vars), and every hook command must end
+`|| true` or `exit 0` — peat failing may never break a session.
 
 ## Multiple agents, one memory
 

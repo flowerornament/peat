@@ -126,11 +126,22 @@ def changelog_entry_is_ready(text: str, version: str) -> bool:
 def changelog_insert_scaffold(text: str, version: str, today: str) -> str:
     if changelog_has_entry(text, version):
         return text
-    if CHANGELOG_INTRO_MARKER not in text:
-        raise ValueError("could not find the CHANGELOG.md intro marker")
-    at = text.index(CHANGELOG_INTRO_MARKER) + len(CHANGELOG_INTRO_MARKER)
+    # an `## Unreleased` section is notes accumulated between releases —
+    # bump retitles it to the new version instead of scaffolding a TODO
+    unreleased, count = re.subn(
+        r"(?m)^## Unreleased[ \t]*$", f"## {version} — {today}", text
+    )
+    if count == 1:
+        return unreleased
+    if count > 1:
+        raise ValueError("CHANGELOG.md has more than one ## Unreleased section")
+    # newest-first: the scaffold goes right before the newest section, after
+    # the intro prose (which may span several paragraphs)
+    first = re.search(r"(?m)^## ", text)
+    if first is None:
+        raise ValueError("could not find a CHANGELOG.md section to insert before")
     scaffold = f"## {version} — {today}\n\n- TODO: summarize release changes.\n\n"
-    return text[:at] + scaffold + text[at:]
+    return text[: first.start()] + scaffold + text[first.start() :]
 
 
 def replace_once(text: str, pattern: str, replacement: str) -> str:

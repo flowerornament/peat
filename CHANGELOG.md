@@ -2,6 +2,25 @@
 
 All notable changes to peat. The ledger is the API to our past; so is this file.
 
+Entries prefixed **Hooks:** mean the hook snippets changed: installed hooks
+are copied config, and you must re-sync them from `hooks/README.md` by
+hand. The snippet stamp there (`hooks snippet vN · date`) tells you which
+version you carry.
+
+## Unreleased
+
+- **Hooks: full-coverage snippets + Codex parity confirmed.** The
+  documented snippets (stamp: v3 · 2026-08-20) now cover all six moments —
+  SessionStart with post-compact nudge, UserPromptSubmit once-per-session
+  nudge, PostToolUse commit nudge, Stop capture with `--final-msg`,
+  PreCompact and SessionEnd salvage — for both Claude Code and Codex
+  (≥0.148 verified: `postToolUse` supported, shell tool matches matcher
+  `Bash`). If you installed from earlier docs you have 2 of 6 moments:
+  replace your hooks block with the v3 snippets, then re-apply any
+  per-project edits (`PEAT_DB` anchors, `READY` gates). The install and
+  update contract now lives in `hooks/README.md` ("Keeping hooks
+  current"); README Install points at it.
+
 ## 0.2.0 — 2026-08-20
 
 - **Observations carry their basis, not just their age.** Every `peat obs`

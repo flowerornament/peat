@@ -53,9 +53,42 @@ class ChangelogTests(unittest.TestCase):
         twice = changelog_insert_scaffold(once, "0.1.1", "2026-08-20")
         self.assertEqual(once, twice)
 
-    def test_insert_scaffold_fails_without_the_intro_marker(self):
+    def test_insert_scaffold_fails_without_any_section(self):
         with self.assertRaises(ValueError):
-            changelog_insert_scaffold("# Changelog\n\nno marker\n", "0.1.1", "2026-08-19")
+            changelog_insert_scaffold("# Changelog\n\nno sections\n", "0.1.1", "2026-08-19")
+
+    def test_bump_retitles_an_unreleased_section(self):
+        text = (
+            "# Changelog\n\n"
+            + CHANGELOG_INTRO_MARKER
+            + "Entries prefixed **Hooks:** mean re-sync.\n\n"
+            + "## Unreleased\n\n- Accumulated note.\n\n"
+            + "## 0.1.0 — 2026-08-18\n\n- Old.\n"
+        )
+        out = changelog_insert_scaffold(text, "0.1.1", "2026-08-19")
+        self.assertNotIn("## Unreleased", out)
+        self.assertIn("## 0.1.1 — 2026-08-19\n\n- Accumulated note.", out)
+        self.assertTrue(changelog_entry_is_ready(out, "0.1.1"))
+
+    def test_two_unreleased_sections_fail(self):
+        text = (
+            "# Changelog\n\n"
+            + CHANGELOG_INTRO_MARKER
+            + "## Unreleased\n\n- a\n\n## Unreleased\n\n- b\n"
+        )
+        with self.assertRaises(ValueError):
+            changelog_insert_scaffold(text, "0.1.1", "2026-08-19")
+
+    def test_scaffold_lands_after_multi_paragraph_intro(self):
+        text = (
+            "# Changelog\n\n"
+            + CHANGELOG_INTRO_MARKER
+            + "Entries prefixed **Hooks:** mean re-sync.\n\n"
+            + "## 0.1.0 — 2026-08-18\n\n- Old.\n"
+        )
+        out = changelog_insert_scaffold(text, "0.1.1", "2026-08-19")
+        self.assertLess(out.index("**Hooks:**"), out.index("## 0.1.1"))
+        self.assertLess(out.index("## 0.1.1"), out.index("## 0.1.0"))
 
     def test_scaffold_is_not_ready_until_edited(self):
         text = changelog_insert_scaffold(CHANGELOG, "0.1.1", "2026-08-19")
