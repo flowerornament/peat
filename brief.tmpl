@@ -44,7 +44,7 @@
 
 {{ "current understanding (agent-asserted, newest wins):" | h1 }}
 {%- for s in subjects %}
-  {{ s.subject | accent }}{{ (" (" ~ s.count ~ " obs") | dim }}{% if not s.cited %}{{ ", uncited" | warn }}{% endif %}{{ (", " ~ s.age ~ "):") | dim }} {{ s.text | clip(120) }}  {{ s.handle | dim }}{% if not loop.last %}
+  {{ s.subject | accent }}{{ (" (" ~ s.count ~ " obs") | dim }}{% if not s.cited %}{{ ", uncited" | warn }}{% endif %}{{ (", " ~ s.age ~ ((", " ~ s.basis) if s.basis else "") ~ "):") | dim }} {{ s.text | clip(120) }}  {{ s.handle | dim }}{% if not loop.last %}
 {% endif %}
 {%- endfor %}
 {%- endif %}

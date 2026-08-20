@@ -522,3 +522,141 @@ fn parse_from_matches_full_parse_suffix() {
         assert_eq!(got, expect, "skip={skip} diverged from full-parse suffix");
     }
 }
+
+// ------------------------------------------------------------- anchoring
+//
+// A claim carries its basis, not just its age: `Obs2` stamps the repo
+// state at deposit, legacy `Obs` parses forever and renders unanchored,
+// and the drift figure is a read-time join over the day table.
+
+fn obs2(
+    session: &str,
+    n: u32,
+    ts: u64,
+    subject: &str,
+    text: &str,
+    basis: Option<crate::event::Basis>,
+) -> (EventId, Envelope) {
+    (
+        (session.to_string(), OBS_SEQ_BASE + n),
+        Envelope::new(
+            session,
+            ts,
+            Event::Obs2 {
+                subject: subject.to_string(),
+                text: text.to_string(),
+                derived_from: vec![],
+                basis,
+            },
+        ),
+    )
+}
+
+#[test]
+fn anchored_and_legacy_obs_coexist() {
+    let dir = tmp();
+    let mut st = open!(&dir);
+    let basis = crate::event::Basis {
+        commit: "abcdef0123456789".into(),
+        dirty: true,
+    };
+    st.wtx(|tx| {
+        for (id, e) in [
+            obs("s", 0, DAY_MS, "subj", "legacy claim"),
+            obs2(
+                "s",
+                1,
+                2 * DAY_MS,
+                "subj",
+                "anchored claim",
+                Some(basis.clone()),
+            ),
+        ] {
+            tx.upsert(&id, &e);
+        }
+    });
+    let (head, rows) = st.rtx(|(_, _, _, (subjects, evidence), _, _)| {
+        (
+            subjects.get(&"subj".to_string()) as Option<SubjStats>,
+            evidence.get(&"subj".to_string()) as Vec<crate::pipeline::ObsRow>,
+        )
+    });
+    let head = head.unwrap();
+    assert_eq!(head.text, "anchored claim");
+    let b = head.basis.expect("winning obs is anchored");
+    assert_eq!(b.commit, "abcdef0123456789");
+    assert!(b.dirty);
+    assert_eq!(b.label(), "@abcdef01+");
+    let legacy = rows.iter().find(|r| r.seq == OBS_SEQ_BASE).unwrap();
+    assert!(legacy.basis.is_none(), "legacy Obs renders unanchored");
+    let anchored = rows.iter().find(|r| r.seq == OBS_SEQ_BASE + 1).unwrap();
+    assert!(anchored.basis.is_some());
+}
+
+#[test]
+fn commits_since_is_day_granular_and_clockless() {
+    let mut days: BTreeMap<u64, DayStats> = BTreeMap::new();
+    for (day, commits) in [(10u64, 3i64), (11, 2), (12, 5)] {
+        days.insert(
+            day,
+            DayStats {
+                commits,
+                ..Default::default()
+            },
+        );
+    }
+    let ts = |day: u64| day * DAY_MS + DAY_MS / 2;
+    assert_eq!(crate::pipeline::commits_since(&days, ts(9)), 10);
+    assert_eq!(crate::pipeline::commits_since(&days, ts(10)), 7);
+    assert_eq!(crate::pipeline::commits_since(&days, ts(12)), 0);
+    assert_eq!(crate::pipeline::commits_since(&days, ts(99)), 0);
+}
+
+/// A view-version mismatch must rebuild every view from the ledger mirror
+/// alone and keep the previous database as a backup — the migration path
+/// every existing db takes on first contact with a new view schema.
+#[test]
+fn view_rebuild_replays_the_ledger() {
+    let dir = tmp();
+    let events = [
+        tool("s", 16, DAY_MS, true),
+        obs("s", 0, DAY_MS, "subj", "legacy claim"),
+        obs2(
+            "s",
+            1,
+            2 * DAY_MS,
+            "subj",
+            "anchored claim",
+            Some(crate::event::Basis {
+                commit: "abcdef0123456789".into(),
+                dirty: false,
+            }),
+        ),
+    ];
+    {
+        let mut st = open!(&dir);
+        st.wtx(|tx| {
+            for (id, e) in &events {
+                tx.upsert(id, e);
+            }
+        });
+        st.checkpoint();
+    }
+    // simulate a db written under the previous view schema
+    let marker = crate::beside(&dir, ".view-version");
+    std::fs::write(&marker, "1\n").unwrap();
+    crate::migrate_views(&dir);
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "2");
+    assert!(crate::beside(&dir, ".old").exists(), "previous db kept");
+    let st = open!(&dir);
+    let (head, ledger_len) = st.rtx(|(_, _, _, (subjects, _), _, ledger)| {
+        (
+            subjects.get(&"subj".to_string()) as Option<SubjStats>,
+            ledger.iter().count(),
+        )
+    });
+    assert_eq!(ledger_len, events.len(), "ledger mirror survives rebuild");
+    let head = head.unwrap();
+    assert_eq!(head.text, "anchored claim");
+    assert_eq!(head.basis.unwrap().commit, "abcdef0123456789");
+}

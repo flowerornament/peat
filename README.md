@@ -49,11 +49,16 @@ Three invariants hold everywhere:
   age labels at print time). This is what makes `asof` replay the truth of a
   past day rather than a reconstruction.
 - **Additive schema evolution only.** Every envelope carries the
-  `EVENT_VERSION` it was written under (currently 2); every envelope ever
+  `EVENT_VERSION` it was written under (currently 3); every envelope ever
   written must parse forever. New variants and optional fields only.
-- **Every recalled line carries its disposition.** Age, origin kind, and
-  citation status are printed inline — rank is not currency, and an uncited
-  observation is visibly a bare assertion.
+  (Views are disposable and rebuild themselves from the ledger when their
+  schema moves — the previous database is kept one generation back.)
+- **Every recalled line carries its disposition.** Age, origin kind,
+  citation status, and basis are printed inline — rank is not currency, an
+  uncited observation is visibly a bare assertion, and an anchored claim
+  shows the commit it was deposited against plus how far the repo has
+  moved since (`@abc1234+ · ~4 commits since`; `+` means the tree was
+  dirty). Claims deposited before v0.2 render unanchored.
 
 ## Architecture
 

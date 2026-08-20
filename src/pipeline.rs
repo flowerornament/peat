@@ -13,7 +13,7 @@
 use fold::pipeline::Keyed;
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Envelope, Event, EventId};
+use crate::event::{Basis, Envelope, Event, EventId};
 
 pub const DAY_MS: u64 = 86_400_000;
 
@@ -49,6 +49,8 @@ pub struct ObsRow {
     pub ts_ms: u64,
     pub text: String,
     pub derived_from: Vec<u32>,
+    /// Repo state at deposit; `None` for pre-v3 obs and non-repo deposits.
+    pub basis: Option<Basis>,
 }
 
 /// Current understanding of one subject. Deliberately dumb (newest obs
@@ -64,6 +66,8 @@ pub struct SubjStats {
     pub last_seq: u32,
     /// whether the winning obs cited mechanical events
     pub cited: bool,
+    /// repo state the winning obs was deposited against
+    pub basis: Option<Basis>,
 }
 
 /// One session's summary row.
@@ -129,6 +133,16 @@ pub fn day_step(acc: &mut DayStats, v: &DayDelta, delta: isize) {
     }
 }
 
+/// Commits recorded on days strictly after `ts_ms`'s day, read from the
+/// materialized day table — the staleness scale for an anchored claim.
+/// No git and no wall clock at read time; day-granular, so the figure is
+/// approximate (same-day later commits don't count) and rendered with `~`.
+pub fn commits_since(days: &std::collections::BTreeMap<u64, DayStats>, ts_ms: u64) -> i64 {
+    days.range(ts_ms / DAY_MS + 1..)
+        .map(|(_, s)| s.commits)
+        .sum()
+}
+
 pub fn file_session(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, String>> {
     match &k.val.kind {
         Event::FileTouch { path } => Some(Keyed::new(path.clone(), k.val.session.clone())),
@@ -157,6 +171,9 @@ pub fn searchable(k: &Keyed<EventId, Envelope>) -> Option<Keyed<EventId, TextRow
     let (text, kind, cited) = match &e.kind {
         Event::Obs {
             text, derived_from, ..
+        }
+        | Event::Obs2 {
+            text, derived_from, ..
         } => (text, "obs", !derived_from.is_empty()),
         Event::FinalMsg { text } => (text, "final", true),
         Event::Said { text } => (text, "said", true),
@@ -179,23 +196,31 @@ pub fn searchable(k: &Keyed<EventId, Envelope>) -> Option<Keyed<EventId, TextRow
 }
 
 pub fn obs_row(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, ObsRow>> {
-    match &k.val.kind {
+    let (subject, text, derived_from, basis) = match &k.val.kind {
         Event::Obs {
             subject,
             text,
             derived_from,
-        } => Some(Keyed::new(
-            subject.clone(),
-            ObsRow {
-                session: k.val.session.clone(),
-                seq: k.key.1,
-                ts_ms: k.val.ts_ms,
-                text: text.clone(),
-                derived_from: derived_from.clone(),
-            },
-        )),
-        _ => None,
-    }
+        } => (subject, text, derived_from, None),
+        Event::Obs2 {
+            subject,
+            text,
+            derived_from,
+            basis,
+        } => (subject, text, derived_from, basis.clone()),
+        _ => return None,
+    };
+    Some(Keyed::new(
+        subject.clone(),
+        ObsRow {
+            session: k.val.session.clone(),
+            seq: k.key.1,
+            ts_ms: k.val.ts_ms,
+            text: text.clone(),
+            derived_from: derived_from.clone(),
+            basis,
+        },
+    ))
 }
 
 /// Newest obs wins, ties broken by seq. Deliberately asymmetric under
@@ -212,6 +237,7 @@ pub fn subj_step(acc: &mut SubjStats, v: &ObsRow, delta: isize) {
         acc.last_ms = v.ts_ms;
         acc.last_seq = v.seq;
         acc.cited = !v.derived_from.is_empty();
+        acc.basis = v.basis.clone();
     }
 }
 

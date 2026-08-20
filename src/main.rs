@@ -29,9 +29,13 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use event::{Envelope, Event, EventId, OBS_SEQ_BASE};
-use pipeline::{DAY_MS, ObsRow, SessStats, SubjStats};
+use event::{Basis, Envelope, Event, EventId, OBS_SEQ_BASE};
+use pipeline::{DAY_MS, DayStats, ObsRow, SessStats, SubjStats};
 use ui::{age_label, clip, short_sess};
+
+/// The day table pulled into memory for read-time joins (staleness of
+/// anchored claims); bounded by the number of days in the history.
+type DayCommits = std::collections::BTreeMap<u64, DayStats>;
 
 /// Shared row filters for the verbs that walk indexed text or the ledger.
 #[derive(clap::Args, Default)]
@@ -241,6 +245,32 @@ fn subject_handle(name: &str) -> String {
     }
 }
 
+/// Repo state at deposit time, stamped by construction — a convention the
+/// depositor must remember is a check that gets deleted. Never fatal:
+/// `None` outside a repo or without git. In a colocated jj repo, HEAD is
+/// `@-` (the last named commit) — stable, unlike the working-copy commit.
+fn deposit_basis() -> Option<Basis> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if commit.is_empty() {
+        return None;
+    }
+    // tracked files only: untracked noise (scratch dirs, data dirs that
+    // self-ignore late) must not brand every deposit dirty
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-uno"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    Some(Basis { commit, dirty })
+}
+
 /// The brief's band budget: flag beats env beats default.
 fn band_budget(flag: Option<usize>) -> usize {
     flag.or_else(|| {
@@ -251,8 +281,90 @@ fn band_budget(flag: Option<usize>) -> usize {
     .unwrap_or(8)
 }
 
+/// Bumped when any view row changes shape (view rows are postcard and
+/// positional, same as the ledger — but views are disposable). On mismatch
+/// the ledger mirror, whose envelopes parse forever, is replayed through
+/// the current pipeline into a fresh database that replaces the old one.
+///
+/// History: 1 = v0.1.x shapes (implicit — no marker file);
+/// 2 = `ObsRow`/`SubjStats` carry the deposit-time `Basis`.
+const VIEW_VERSION: u32 = 2;
+
+/// A path beside the db dir: `.peat/db` → `.peat/db<suffix>`.
+fn beside(db: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    db.with_file_name(name)
+}
+
+/// Rebuild every view from the ledger when the view schema has moved on.
+/// Runs before the main open; self-healing by construction — hook-driven
+/// invocations must never be the ones that fail. The previous database is
+/// kept at `db.old` (one generation), never deleted: the ledger is the
+/// investment, and this is the code path that touches it.
+fn migrate_views(dbdir: &std::path::Path) {
+    let marker = beside(dbdir, ".view-version");
+    let on_disk: Option<u32> = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+    if on_disk == Some(VIEW_VERSION) {
+        return;
+    }
+    if !dbdir.exists() {
+        // fresh database: no rows exist in any shape yet
+        let _ = std::fs::write(&marker, format!("{VIEW_VERSION}\n"));
+        return;
+    }
+    let phase = ui::Phase::new("view schema changed — rebuilding views from the ledger");
+    // reading only the ledger mirror is safe under any view schema:
+    // envelopes are additive-only, and nothing here reads a view row
+    let events: Vec<(EventId, Envelope)> = {
+        let st = db::open(dbdir.to_path_buf(), || peat_pipeline!());
+        st.rtx(|(_, _, _, _, _, ledger)| ledger.iter().collect())
+    };
+    let fresh_dir = beside(dbdir, ".rebuild");
+    let _ = std::fs::remove_dir_all(&fresh_dir);
+    {
+        let mut fresh = db::open(fresh_dir.clone(), || peat_pipeline!());
+        fresh.wtx(|tx| {
+            for (id, e) in &events {
+                tx.upsert(id, e);
+            }
+        });
+        fresh.checkpoint();
+    }
+    let backup = beside(dbdir, ".old");
+    let _ = std::fs::remove_dir_all(&backup);
+    let swap = std::fs::rename(dbdir, &backup).and_then(|()| std::fs::rename(&fresh_dir, dbdir));
+    if let Err(e) = swap {
+        ui::error(&format!(
+            "view rebuild could not swap databases at {}: {e} — the \
+original is intact (possibly at {})",
+            dbdir.display(),
+            backup.display()
+        ));
+        std::process::exit(1);
+    }
+    let _ = std::fs::write(&marker, format!("{VIEW_VERSION}\n"));
+    phase.done();
+    if events.is_empty() {
+        ui::note(
+            "views rebuilt from an empty ledger mirror — if this db held \
+sessions, re-run `peat capture` on their transcripts to backfill",
+        );
+    } else {
+        ui::note(&format!(
+            "view schema v{VIEW_VERSION}: rebuilt from {} ledger events \
+(previous db kept at {})",
+            events.len(),
+            backup.display()
+        ));
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
+    migrate_views(&db::db_path());
     let mut st = db::open(db::db_path(), || peat_pipeline!());
 
     // ---- shape dispatch: bare `peat` orients; `peat <thing>` looks
@@ -401,10 +513,11 @@ beside the shared db); pass --session",
             let env = Envelope::new(
                 &session,
                 ts,
-                Event::Obs {
+                Event::Obs2 {
                     subject: subject.clone(),
                     text: text.clone(),
                     derived_from: from,
+                    basis: deposit_basis(),
                 },
             );
             // Advisory lint, never blocking: observations are read months
@@ -496,14 +609,15 @@ consider splitting into separate observations",
             if let Some(subj) = subject {
                 // the claims register read: current text plus the full
                 // evidence trail, straight from the evidence multimap
-                let (head, mut rows) = st.rtx(|(_, _, _, (subjects, evidence), _, _)| {
+                let (head, mut rows, days) = st.rtx(|(days, _, _, (subjects, evidence), _, _)| {
                     (
                         subjects.get(&subj) as Option<SubjStats>,
                         evidence.get(&subj) as Vec<ObsRow>,
+                        days.iter().collect::<DayCommits>(),
                     )
                 });
                 rows.sort_by_key(|r| std::cmp::Reverse(r.ts_ms));
-                print_subject(&subj, head, &rows, now, json);
+                print_subject(&subj, head, &rows, &days, now, json);
                 return;
             }
             let query = query.join(" ");
@@ -521,9 +635,13 @@ consider splitting into separate observations",
                 age: String,
                 session: String,
                 seq: u32,
+                /// rendered anchor disposition (`@abc1234+ · ~4 commits
+                /// since`); obs hits only, and only when anchored
+                basis: Option<String>,
                 text: String,
             }
-            let hits: Vec<Hit> = st.rtx(|(_, _, (kw, vec, texts), _, _, _)| {
+            let hits: Vec<Hit> = st.rtx(|(days, _, (kw, vec, texts), _, _, ledger)| {
+                let day_commits: DayCommits = days.iter().collect();
                 brief::rrf(
                     &kw.search(&query, limit * 2),
                     &vec.search(&ese::encode_single(&query)),
@@ -531,13 +649,27 @@ consider splitting into separate observations",
                 .into_iter()
                 .filter_map(|(id, score)| {
                     let t = texts.get(&id)?;
-                    filter.matches(now, &id.0, &t.kind, t.ts_ms).then(|| Hit {
+                    if !filter.matches(now, &id.0, &t.kind, t.ts_ms) {
+                        return None;
+                    }
+                    // the anchor lives on the envelope, not the text row:
+                    // a point-read per obs hit, bounded by `limit`
+                    let basis = (t.kind == "obs")
+                        .then(|| ledger.get(&id))
+                        .flatten()
+                        .and_then(|e: Envelope| match e.kind {
+                            Event::Obs2 { basis, .. } => basis,
+                            _ => None,
+                        })
+                        .map(|b| b.label_with(pipeline::commits_since(&day_commits, t.ts_ms)));
+                    Some(Hit {
                         score: (score * 1000.0).round() / 1000.0,
                         kind: t.kind,
                         cited: t.cited,
                         age: age_label(now, t.ts_ms),
                         session: short_sess(&id.0),
                         seq: id.1,
+                        basis,
                         text: t.text,
                     })
                 })
@@ -557,7 +689,16 @@ consider splitting into separate observations",
                     };
                     println!(
                         "  {} {} {}",
-                        ui::dim(&format!("[{}{} · {}]", h.kind, cited, h.age)),
+                        ui::dim(&format!(
+                            "[{}{} · {}{}]",
+                            h.kind,
+                            cited,
+                            h.age,
+                            match &h.basis {
+                                Some(b) => format!(" · {b}"),
+                                None => String::new(),
+                            }
+                        )),
                         clip(&h.text, 200),
                         ui::dim(&format!("▸ peat {} {}", h.session, h.seq)),
                     );
@@ -609,8 +750,10 @@ consider splitting into separate observations",
 
         Cmd::Subjects { json } => {
             let now = now_ms();
-            let mut subj: Vec<(String, SubjStats)> =
-                st.rtx(|(_, _, _, (subjects, _), _, _)| subjects.iter().collect());
+            let (mut subj, days): (Vec<(String, SubjStats)>, DayCommits) =
+                st.rtx(|(days, _, _, (subjects, _), _, _)| {
+                    (subjects.iter().collect(), days.iter().collect())
+                });
             subj.sort_by_key(|(_, s)| std::cmp::Reverse(s.last_ms));
             if json {
                 let rows: Vec<serde_json::Value> = subj
@@ -619,6 +762,10 @@ consider splitting into separate observations",
                         serde_json::json!({
                             "subject": name, "support": s.count, "cited": s.cited,
                             "age": age_label(now, s.last_ms), "text": s.text,
+                            "basis": s.basis.as_ref().map(|b| serde_json::json!({
+                                "commit": b.commit, "dirty": b.dirty,
+                                "commits_since": pipeline::commits_since(&days, s.last_ms),
+                            })),
                         })
                     })
                     .collect();
@@ -631,10 +778,17 @@ consider splitting into separate observations",
                         "  {} {} {}  {}",
                         ui::accent(&name),
                         ui::dim(&format!(
-                            "({} obs{}, {}):",
+                            "({} obs{}, {}{}):",
                             s.count,
                             if s.cited { "" } else { ", uncited" },
-                            age_label(now, s.last_ms)
+                            age_label(now, s.last_ms),
+                            match &s.basis {
+                                Some(b) => format!(
+                                    ", {}",
+                                    b.label_with(pipeline::commits_since(&days, s.last_ms))
+                                ),
+                                None => String::new(),
+                            }
                         )),
                         clip(&s.text, 120),
                         ui::dim(&subject_handle(&name))
@@ -1011,7 +1165,14 @@ history starts later, or the db predates the ledger mirror \
 }
 
 /// Print one subject's evidence trail (`recall --subject`).
-fn print_subject(subj: &str, head: Option<SubjStats>, rows: &[ObsRow], now: u64, json: bool) {
+fn print_subject(
+    subj: &str,
+    head: Option<SubjStats>,
+    rows: &[ObsRow],
+    days: &DayCommits,
+    now: u64,
+    json: bool,
+) {
     if json {
         println!(
             "{}",
@@ -1022,6 +1183,10 @@ fn print_subject(subj: &str, head: Option<SubjStats>, rows: &[ObsRow], now: u64,
                     "session": r.session, "seq": r.seq,
                     "age": age_label(now, r.ts_ms),
                     "cited": !r.derived_from.is_empty(),
+                    "basis": r.basis.as_ref().map(|b| serde_json::json!({
+                        "commit": b.commit, "dirty": b.dirty,
+                        "commits_since": pipeline::commits_since(days, r.ts_ms),
+                    })),
                     "text": r.text,
                 })).collect::<Vec<_>>(),
             }))
@@ -1045,13 +1210,20 @@ fn print_subject(subj: &str, head: Option<SubjStats>, rows: &[ObsRow], now: u64,
         println!(
             "  {} {}",
             ui::dim(&format!(
-                "[{} · {}{}]",
+                "[{} · {}{}{}]",
                 short_sess(&r.session),
                 age_label(now, r.ts_ms),
                 if r.derived_from.is_empty() {
                     ""
                 } else {
                     " · cited"
+                },
+                match &r.basis {
+                    Some(b) => format!(
+                        " · {}",
+                        b.label_with(pipeline::commits_since(days, r.ts_ms))
+                    ),
+                    None => String::new(),
                 }
             )),
             r.text

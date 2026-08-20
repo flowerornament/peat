@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped when the schema changes shape. Written into every envelope.
-pub const EVENT_VERSION: u16 = 2;
+pub const EVENT_VERSION: u16 = 3;
 
 pub type SessionId = String;
 
@@ -93,11 +93,40 @@ pub enum Event {
     /// A small claim the agent chose to record. `derived_from` cites the
     /// seqs of mechanical events it rests on; empty means a bare assertion,
     /// and readers are told so.
+    ///
+    /// Superseded by [`Event::Obs2`] for new deposits (postcard is
+    /// positional, so `Obs` could not grow a field in place); kept so
+    /// every pre-v3 envelope parses forever, rendered as unanchored.
     Obs {
         subject: String,
         text: String,
         derived_from: Vec<u32>,
     },
+
+    /// [`Event::Obs`] plus the repo state the claim was deposited against:
+    /// a claim carries its basis, not just its age, so a reader can tell a
+    /// durable rule from a snapshot that has since rotted. Added in v3;
+    /// additive. Stamped by construction — the depositor never opts in.
+    Obs2 {
+        subject: String,
+        text: String,
+        derived_from: Vec<u32>,
+        /// `None` when the deposit ran outside any git repo.
+        basis: Option<Basis>,
+    },
+}
+
+/// Repo state at deposit time, stamped mechanically into [`Event::Obs2`].
+/// Frozen shape (postcard is positional): a future stamp that needs more
+/// fields is a new envelope variant, not a field here.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Basis {
+    /// Full commit hash of `HEAD` in the depositor's cwd (in a colocated
+    /// jj repo this is `@-`: the last named commit, not the working copy).
+    pub commit: String,
+    /// Whether tracked files had uncommitted changes — the claim may rest
+    /// on state no commit records.
+    pub dirty: bool,
 }
 
 pub const USER_MSG_CAP: usize = 2048;
@@ -137,7 +166,7 @@ impl Event {
             Event::Compaction {} => "compacted",
             Event::Said { .. } => "said",
             Event::CompactSummary { .. } => "compact",
-            Event::Obs { .. } => "obs",
+            Event::Obs { .. } | Event::Obs2 { .. } => "obs",
         }
     }
 
@@ -180,6 +209,47 @@ impl Event {
                     format!(" [cites {} events]", derived_from.len())
                 }
             ),
+            Event::Obs2 {
+                subject,
+                text,
+                derived_from,
+                basis,
+            } => format!(
+                "{}: {}{}{}",
+                subject,
+                one(text),
+                if derived_from.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [cites {} events]", derived_from.len())
+                },
+                basis
+                    .as_ref()
+                    .map(|b| format!(" {}", b.label()))
+                    .unwrap_or_default()
+            ),
+        }
+    }
+}
+
+impl Basis {
+    /// The inline anchor tag every render uses: `@abc1234`, `+` if the
+    /// tree was dirty at deposit.
+    pub fn label(&self) -> String {
+        format!(
+            "@{}{}",
+            &self.commit[..self.commit.len().min(8)],
+            if self.dirty { "+" } else { "" }
+        )
+    }
+
+    /// The full disposition: anchor tag plus how far the repo has moved
+    /// since (from [`crate::pipeline::commits_since`]).
+    pub fn label_with(&self, commits_since: i64) -> String {
+        if commits_since > 0 {
+            format!("{} · ~{commits_since} commits since", self.label())
+        } else {
+            self.label()
         }
     }
 }

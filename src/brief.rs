@@ -199,6 +199,11 @@ pub fn assemble<R: Readable>(
                 "count": s.count,
                 "cited": s.cited,
                 "age": age_label(now, s.last_ms),
+                // anchor disposition of the winning obs, pre-rendered:
+                // the brief is a bounded read, not a data API
+                "basis": s.basis.as_ref().map(|b| {
+                    b.label_with(crate::pipeline::commits_since(&all_days, s.last_ms))
+                }),
                 "text": s.text,
                 // the expansion path: briefs clip, trails read whole
                 "handle": crate::subject_handle_pub(name),
