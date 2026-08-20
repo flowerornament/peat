@@ -1,8 +1,16 @@
 # peat
 
+> **Pre-alpha.** v0.1.0 (August 2026), built at Bog-A-Thon 3 and in daily
+> use by its author — but a single-user tool pinned to a patched fork of
+> fold, with no compatibility track record yet. The ledger is designed to
+> outlive everything (versioned envelopes, additive-only evolution); so far
+> that promise is intent, not history. Expect the CLI, views, and hook
+> contract to change without notice.
+
 Agent memory as a fold. Coding agents deposit events — mechanical session
 exhaust plus small judged observations — into one append-forever ledger, and
-every readable surface is a [bogkit/fold](../../fold) view materialized
+every readable surface is a
+[bogkit/fold](https://github.com/flowercomputers/bogkit) view materialized
 incrementally over it. Sessions end; what they learned does not.
 
 ```console
