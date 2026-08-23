@@ -4,6 +4,11 @@ All notable changes to peat. The ledger is the API to our past; so is this file.
 
 Entries prefixed **Hooks:** mean the hook snippets changed: installed hooks are copied config, and you must re-sync them from `hooks/README.md` by hand. The snippet stamp there (`hooks snippet vN · date`) tells you which version you carry.
 
+## Unreleased
+
+- **Hooks: Codex hooks do nothing until you trust them — documented.** Codex gates every non-managed command hook behind an explicit review and records trust against the hook's exact text; an untrusted hook is skipped silently, with no error and no ledger entry. Copying `.codex/hooks.json` therefore installs nothing that runs: you must also run `/hooks` in the Codex CLI to review and trust it, per project, and again after **every** re-sync this changelog asks for, because editing a hook's text marks it for review again. `hooks/README.md` gains a "Codex: hooks must be trusted before they run" section with the two gates (project trust, hook trust) and a fire-don't-read verification recipe. No snippet changes — the v3 stamps still stand.
+- Codex parity is now verified end to end against 0.149 rather than read from its source: a live session confirmed the documented stdin fields arrive and that `SessionStart` stdout is injected into the Codex model's context (the model read back a marker that existed only inside the injected brief). Noted for later: Codex has a dedicated `PostCompact` event that could carry the post-compact deposit nudge, which is dormant there today because its `SessionStart` has no `compact` source.
+
 ## 0.2.1 — 2026-08-20
 
 - **Hooks: full-coverage snippets + Codex parity confirmed.** The documented snippets (stamp: v3 · 2026-08-20) now cover all six moments — SessionStart with post-compact nudge, UserPromptSubmit once-per-session nudge, PostToolUse commit nudge, Stop capture with `--final-msg`, PreCompact and SessionEnd salvage — for both Claude Code and Codex (≥0.148 verified: `postToolUse` supported, shell tool matches matcher `Bash`). If you installed from earlier docs you have 2 of 6 moments: replace your hooks block with the v3 snippets, then re-apply any per-project edits (`PEAT_DB` anchors, `READY` gates). The install and update contract now lives in `hooks/README.md` ("Keeping hooks current"); README Install points at it.

@@ -101,6 +101,10 @@ All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `RE
 
 Identical contract (Codex ≥0.148 hooks engine is Claude-compatible: `postToolUse` supported, shell tool serializes canonical `tool_name: "Bash"`). One difference: Stop falls back to finding the rollout under `~/.codex/sessions/` when stdin carries no transcript path.
 
+**Copying this file is not enough — Codex will not run it until you trust it.** See [Codex: hooks must be trusted](#codex-hooks-must-be-trusted-before-they-run) below; an untrusted hook is skipped silently, with no error and no output.
+
+Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionStart]]` with `hooks = [{ type = "command", command = "…" }]`); the two forms are equivalent, and a layer carrying both loads both and warns. This file is the recommended form.
+
 <!-- hooks snippet v3 · 2026-08-20 · codex -->
 
 ```json
@@ -189,6 +193,29 @@ Hooks are installed by copying, so upgrading the peat binary never updates them.
 - The snippets in this file are canonical and carry a version stamp (`hooks snippet vN · date`). Releases that change them say **Hooks:** in the CHANGELOG, with what changed and what to re-copy.
 - After `peat` upgrades, if the CHANGELOG mentions **Hooks:** since your last sync, re-copy the affected blocks. There is no automation, deliberately: hook config often carries per-project edits (`PEAT_DB` anchors, `READY` gates), and a blind overwrite would eat them.
 - **Fire, don't read, after any hook edit**: pipe a synthetic stdin JSON through the command and check both branches — e.g. `printf '{"tool_name":"Bash","tool_input":{"command":"git commit -m x"}}' | sh -c "<command>"` must print an `additionalContext` JSON object, and a non-commit input must print nothing and exit 0. A hook path that quietly stops resolving (a moved binary, a stale absolute path) is invisible at runtime by design — firing the hook is the only check that sees it.
+- **On Codex, re-copying a snippet also un-trusts it.** Trust is recorded against the hook's exact text, so a re-synced hook is skipped until you review it again in `/hooks`. Re-sync and re-trust are one operation, never two.
+
+## Codex: hooks must be trusted before they run
+
+Codex gates every non-managed command hook behind an explicit review. Copying `.codex/hooks.json` into a project installs nothing that runs: Codex records trust against the **hash of the exact hook definition**, and an untrusted hook is skipped **silently** — no error, no output, no entry in the ledger. A hook you can read in the file and a hook that runs are different things.
+
+Two independent gates, both required:
+
+1. **Project trust.** Project-local hooks load only when the project's `.codex/` layer is trusted; in an untrusted project Codex ignores project config, hooks, and rules entirely (user-level hooks still load).
+2. **Hook trust.** Run `/hooks` in the Codex CLI to inspect sources, review new or changed hooks, and trust them. When review is pending at startup, Codex prints a warning pointing at `/hooks` — easy to miss in a scrollback, and the only symptom you get.
+
+Because trust is hash-keyed, **every edit to a hook's text marks it for review again**, including the re-syncs this file's update contract asks for. Budget one `/hooks` pass per desk after any snippet change.
+
+For non-interactive automation that vets hook sources by other means, `codex exec --dangerously-bypass-hook-trust` runs enabled hooks without persisted trust for that invocation. It is the right tool for a scripted verification and the wrong one for daily use.
+
+**Verify by firing, not by reading — the file being present proves nothing here.** After trusting, start a fresh Codex session in the project and check that the mechanical half actually happened:
+
+```console
+$ cat .peat/current-session      # written by SessionStart; should hold the new session id
+$ peat <that-id>                 # the session should exist in the ledger after the first Stop
+```
+
+If `.peat/current-session` still holds an older id, the hook did not run — the usual cause is pending review in `/hooks`, not a broken command.
 
 ## The moment-coverage matrix
 
@@ -207,7 +234,7 @@ Every moment a session can produce or lose knowledge, and the hook that covers i
 Two behaviors worth knowing:
 
 - **peat never blocks.** A blocking Stop hook — exit 2 or `decision:block` — renders as a `hook error`, force-continues the turn, and displaces the reply the user was reading: it is enforcement machinery, wrong for soliciting judgment. Every peat prompt travels as `additionalContext` (invisible to the user, weighed by the agent in flow): the commit nudge, the post-compact nudge, and the once-per-session deposit reminder at the first user prompt. If the user can notice a hook, it is the wrong channel.
-- **Codex parity, verified at 0.148.** `HookEventName` includes `postToolUse` and the shell tool serializes canonical `tool_name: "Bash"`, so matchers and stdin contracts are identical; the snippets above differ only in the Stop rollout-path fallback. One gap remains: Codex's `SessionStart` `source` has no `compact` value, so the post-compact nudge is dormant there; `PreCompact` salvage still covers the mechanical half.
+- **Codex parity, verified end to end at 0.149.** Matchers and the stdin contract are identical (`session_id`, `transcript_path`, `cwd` all arrive as documented), and `SessionStart` stdout *is* injected into the Codex model's context — confirmed by running a real session whose model read back a marker that existed only inside the injected brief. The snippets differ only in the Stop rollout-path fallback. Two Codex-specific facts matter more than the parity itself: **hooks must be trusted before they run** (next section), and Codex's `SessionStart` `source` has no `compact` value, so the post-compact nudge is dormant there — `PreCompact` salvage still covers the mechanical half, and Codex has a dedicated `PostCompact` event that could carry the judged half (documented in its event list; not yet wired here).
 
 ## Worktree desks
 

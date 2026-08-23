@@ -198,7 +198,7 @@ Hook contract, stamped snippets, and the update story live in [`hooks/README.md`
 | `PreCompact`         | salvage capture before the context window is replaced                                                                                                  |
 | `SessionEnd`         | salvage capture on `/clear` and other non-Stop endings                                                                                                 |
 
-Codex ≥0.148 supports the same hook set and stdin contract; its snippet (one Stop fallback difference) is in `hooks/README.md`. Two contract facts worth repeating: hooks receive **stdin JSON** (there are no `$CLAUDE_TRANSCRIPT_PATH`-style env vars), and every hook command must end `|| true` or `exit 0` — peat failing may never break a session.
+Codex ≥0.148 supports the same hook set and stdin contract; its snippet (one Stop fallback difference) is in `hooks/README.md`. **On Codex the hooks must also be trusted before they run** — copying the file installs nothing that fires; run `/hooks` in the Codex CLI to review and trust, and again after any re-sync, because trust is keyed to the hook's exact text. Two contract facts worth repeating: hooks receive **stdin JSON** (there are no `$CLAUDE_TRANSCRIPT_PATH`-style env vars), and every hook command must end `|| true` or `exit 0` — peat failing may never break a session.
 
 ## Multiple agents, one memory
 
