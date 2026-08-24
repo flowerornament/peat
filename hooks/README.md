@@ -27,7 +27,7 @@ Every moment receives at least:
 
 All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `READY` gates) go on top — see **Worktree desks**.
 
-<!-- hooks snippet v3 · 2026-08-20 · claude -->
+<!-- hooks snippet v4 · 2026-08-24 · claude -->
 
 ```json
 {
@@ -48,7 +48,7 @@ All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `RE
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); { [ -n \"$tp\" ] && peat capture \"$tp\"; } 2>/dev/null || true"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && sh -mc \"nohup peat capture \\\"$tp\\\" >/dev/null 2>&1 &\" 2>/dev/null; exit 0"
           }
         ]
       }
@@ -58,7 +58,7 @@ All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `RE
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); { [ -n \"$tp\" ] && peat capture \"$tp\"; } 2>/dev/null; exit 0"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && sh -mc \"nohup peat capture \\\"$tp\\\" >/dev/null 2>&1 &\" 2>/dev/null; exit 0"
           }
         ]
       }
@@ -68,7 +68,7 @@ All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `RE
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); mkdir -p .peat; printf '%s' \"$in\" | jq -r '.session_id' > .peat/current-session 2>/dev/null; peat brief 2>/dev/null || true; src=$(printf '%s' \"$in\" | jq -r '.source // empty'); if [ \"$src\" = \"compact\" ]; then echo \"\"; echo \"peat: context was just compacted — if durable knowledge from before the compaction is not yet deposited, do it now from the summary: peat obs <subject> \\\"<one-line claim>\\\"\"; fi; exit 0"
+            "command": "in=$(cat); mkdir -p .peat; printf '%s' \"$in\" | jq -r '.session_id' > .peat/current-session 2>/dev/null; PEAT_LOCK_WAIT_SECS=15 peat brief 2>/dev/null || true; src=$(printf '%s' \"$in\" | jq -r '.source // empty'); if [ \"$src\" = \"compact\" ]; then echo \"\"; echo \"peat: context was just compacted — if durable knowledge from before the compaction is not yet deposited, do it now from the summary: peat obs <subject> \\\"<one-line claim>\\\"\"; fi; exit 0"
           }
         ]
       }
@@ -78,7 +78,7 @@ All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `RE
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); { [ -n \"$tp\" ] && peat capture \"$tp\" --final-msg \"$fm\"; } 2>/dev/null || true"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); { [ -n \"$tp\" ] && PEAT_LOCK_WAIT_SECS=20 peat capture \"$tp\" --final-msg \"$fm\"; } 2>/dev/null || true"
           }
         ]
       }
@@ -105,7 +105,7 @@ Identical contract (Codex ≥0.148 hooks engine is Claude-compatible: `postToolU
 
 Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionStart]]` with `hooks = [{ type = "command", command = "…" }]`); the two forms are equivalent, and a layer carrying both loads both and warns. This file is the recommended form.
 
-<!-- hooks snippet v3 · 2026-08-20 · codex -->
+<!-- hooks snippet v4 · 2026-08-24 · codex -->
 
 ```json
 {
@@ -126,7 +126,7 @@ Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionS
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); { [ -n \"$tp\" ] && peat capture \"$tp\"; } 2>/dev/null; exit 0"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && sh -mc \"nohup peat capture \\\"$tp\\\" >/dev/null 2>&1 &\" 2>/dev/null; exit 0"
           }
         ]
       }
@@ -136,7 +136,7 @@ Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionS
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); { [ -n \"$tp\" ] && peat capture \"$tp\"; } 2>/dev/null; exit 0"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && sh -mc \"nohup peat capture \\\"$tp\\\" >/dev/null 2>&1 &\" 2>/dev/null; exit 0"
           }
         ]
       }
@@ -146,7 +146,7 @@ Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionS
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); mkdir -p .peat; printf '%s' \"$in\" | jq -r '.session_id' > .peat/current-session 2>/dev/null; peat brief 2>/dev/null || true; src=$(printf '%s' \"$in\" | jq -r '.source // empty'); if [ \"$src\" = \"compact\" ]; then echo \"\"; echo \"peat: context was just compacted — if durable knowledge from before the compaction is not yet deposited, do it now from the summary: peat obs <subject> \\\"<one-line claim>\\\"\"; fi; exit 0"
+            "command": "in=$(cat); mkdir -p .peat; printf '%s' \"$in\" | jq -r '.session_id' > .peat/current-session 2>/dev/null; PEAT_LOCK_WAIT_SECS=15 peat brief 2>/dev/null || true; src=$(printf '%s' \"$in\" | jq -r '.source // empty'); if [ \"$src\" = \"compact\" ]; then echo \"\"; echo \"peat: context was just compacted — if durable knowledge from before the compaction is not yet deposited, do it now from the summary: peat obs <subject> \\\"<one-line claim>\\\"\"; fi; exit 0"
           }
         ]
       }
@@ -156,7 +156,7 @@ Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionS
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); sid=$(printf '%s' \"$in\" | jq -r '.session_id // empty'); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); [ -z \"$tp\" ] && [ -n \"$sid\" ] && tp=$(find \"$HOME/.codex/sessions\" -name \"rollout-*${sid}*.jsonl\" 2>/dev/null | head -1); { [ -n \"$tp\" ] && peat capture \"$tp\" --final-msg \"$fm\"; } 2>/dev/null || true"
+            "command": "in=$(cat); sid=$(printf '%s' \"$in\" | jq -r '.session_id // empty'); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); [ -z \"$tp\" ] && [ -n \"$sid\" ] && tp=$(find \"$HOME/.codex/sessions\" -name \"rollout-*${sid}*.jsonl\" 2>/dev/null | head -1); { [ -n \"$tp\" ] && PEAT_LOCK_WAIT_SECS=20 peat capture \"$tp\" --final-msg \"$fm\"; } 2>/dev/null || true"
           }
         ]
       }
@@ -194,6 +194,29 @@ Hooks are installed by copying, so upgrading the peat binary never updates them.
 - After `peat` upgrades, if the CHANGELOG mentions **Hooks:** since your last sync, re-copy the affected blocks. There is no automation, deliberately: hook config often carries per-project edits (`PEAT_DB` anchors, `READY` gates), and a blind overwrite would eat them.
 - **Fire, don't read, after any hook edit**: pipe a synthetic stdin JSON through the command and check both branches — e.g. `printf '{"tool_name":"Bash","tool_input":{"command":"git commit -m x"}}' | sh -c "<command>"` must print an `additionalContext` JSON object, and a non-commit input must print nothing and exit 0. A hook path that quietly stops resolving (a moved binary, a stale absolute path) is invisible at runtime by design — firing the hook is the only check that sees it.
 - **On Codex, re-copying a snippet also un-trusts it.** Trust is recorded against the hook's exact text, so a re-synced hook is skipped until you review it again in `/hooks`. Re-sync and re-trust are one operation, never two.
+
+## Deadlines: why a hook gets cancelled
+
+A harness cancels hooks that are still running when it needs to move on — most visibly at teardown, where you see:
+
+```
+SessionEnd hook [...] failed: Hook cancelled
+```
+
+That message means the hook was aborted, not that it failed. Two peat-side costs used to make it likely, and v4 removes both:
+
+- **Salvage captures now run detached.** `PreCompact` and `SessionEnd` spawn `peat capture` in its own process group and return in ~10 ms instead of holding the session open for the length of a capture. The work finishes in the background, so a teardown can no longer interrupt it. Their stdout was already discarded, so nothing is lost by not waiting.
+- **Lock waits are bounded below the deadline.** peat waits politely for the single-writer lock (`PEAT_LOCK_WAIT_SECS`, default 120 s — correct for a human at a terminal, far too patient for a hook). The synchronous hooks now cap it: 15 s for the wake brief, 20 s for the `Stop` capture. Past that peat exits `EX_TEMPFAIL` and the hook skips silently, which is the intended behaviour on a busy shared ledger — a skipped capture heals on the next one.
+
+What a capture costs, measured on a 147 MB shared ledger: a **cold** capture of a 12.8 MB / 5,031-line transcript takes ~6 s, while a warm re-capture of the same file takes ~0.3 s. The gap is the per-transcript cursor, so the expensive case is a transcript peat has never seen — which is exactly what a `--resume` of a long-lived session hands to `SessionEnd`.
+
+**A cancelled hook costs at most a delay.** The transcript stays on disk and capture is idempotent, so anything missed is recovered by capturing that file again:
+
+```console
+$ peat capture ~/.claude/projects/<slug>/<session-id>.jsonl
+```
+
+Run that if you see the message and want the tail of that session in the ledger now; it also writes the cursor, so every later capture of it is cheap.
 
 ## Codex: hooks must be trusted before they run
 
