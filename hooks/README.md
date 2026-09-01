@@ -23,6 +23,14 @@ Every moment receives at least:
 
 `SessionStart` is one of the few hooks whose **plain-text stdout is added to the session context** — exactly what `peat brief` wants. The judgment nudges (`UserPromptSubmit`, `PostToolUse`) must instead print a JSON object with an `additionalContext` key — invisible to the user, weighed by the agent. `Stop`/`PreCompact`/`SessionEnd` stdout goes to the debug log only; rely on exit code 0.
 
+**The two fabrics disagree about where `additionalContext` goes, and this is the one place the snippets genuinely diverge.** Claude Code takes it as a top-level field; Codex requires it nested under `hookSpecificOutput` with a matching `hookEventName`:
+
+```json
+{ "hookSpecificOutput": { "hookEventName": "PostToolUse", "additionalContext": "…" } }
+```
+
+Sending Claude's flat shape to Codex is a hard error — `hook returned invalid post-tool-use JSON output`, once per matching tool call — not a silent no-op. Codex also *ignores* plain-text stdout on `PostToolUse`, so JSON is the only channel there. Copy each fabric's snippet as written rather than porting one to the other.
+
 ## Snippet — `.claude/settings.json` (project)
 
 All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `READY` gates) go on top — see **Worktree desks**.
@@ -99,13 +107,13 @@ All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `RE
 
 ## Snippet — `.codex/hooks.json` (project)
 
-Identical contract (Codex ≥0.148 hooks engine is Claude-compatible: `postToolUse` supported, shell tool serializes canonical `tool_name: "Bash"`). One difference: Stop falls back to finding the rollout under `~/.codex/sessions/` when stdin carries no transcript path.
+Near-identical contract (Codex ≥0.148 hooks engine is Claude-compatible: `postToolUse` supported, shell tool serializes canonical `tool_name: "Bash"`). Two differences, both already applied below: the nudges nest `additionalContext` under `hookSpecificOutput` (see **Stdout treatment**), and Stop falls back to finding the rollout under `~/.codex/sessions/` when stdin carries no transcript path.
 
 **Copying this file is not enough — Codex will not run it until you trust it.** See [Codex: hooks must be trusted](#codex-hooks-must-be-trusted-before-they-run) below; an untrusted hook is skipped silently, with no error and no output.
 
 Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionStart]]` with `hooks = [{ type = "command", command = "…" }]`); the two forms are equivalent, and a layer carrying both loads both and warns. This file is the recommended form.
 
-<!-- hooks snippet v4 · 2026-08-24 · codex -->
+<!-- hooks snippet v5 · 2026-08-31 · codex -->
 
 ```json
 {
@@ -116,7 +124,7 @@ Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionS
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); cmd=$(printf '%s' \"$in\" | jq -r '.tool_input.command // empty'); case \"$cmd\" in *'git commit'*|*'jj describe'*|*'just land'*) printf '{\"additionalContext\":\"a commit landed — deposit peat obs <subject> \\\\\"<one-line claim>\\\\\" for anything durable learned this change\"}' ;; esac; exit 0"
+            "command": "in=$(cat); cmd=$(printf '%s' \"$in\" | jq -r '.tool_input.command // empty'); case \"$cmd\" in *'git commit'*|*'jj describe'*|*'just land'*) printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"a commit landed — deposit peat obs <subject> \\\\\"<one-line claim>\\\\\" for anything durable learned this change\"}}' ;; esac; exit 0"
           }
         ]
       }
@@ -166,7 +174,7 @@ Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionS
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); sid=$(printf '%s' \"$in\" | jq -r '.session_id // empty'); mk=.peat/nudged-\"$sid\"; if [ -n \"$sid\" ] && [ ! -f \"$mk\" ]; then mkdir -p .peat; touch \"$mk\"; printf %s \"{\\\"additionalContext\\\": \\\"peat is recording this session. At natural completion points \\\\u2014 a commit, a finished task \\\\u2014 deposit durable knowledge: peat obs <subject> \\\\\\\"<one-line claim>\\\\\\\" [--from seq,seq]. Read a belief trail with: peat <subject>.\\\"}\"; fi; exit 0"
+            "command": "in=$(cat); sid=$(printf '%s' \"$in\" | jq -r '.session_id // empty'); mk=.peat/nudged-\"$sid\"; if [ -n \"$sid\" ] && [ ! -f \"$mk\" ]; then mkdir -p .peat; touch \"$mk\"; printf '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"peat is recording this session. At natural completion points — a commit, a finished task — deposit durable knowledge: peat obs <subject> \\\\\"<one-line claim>\\\\\" [--from seq,seq]. Read a belief trail with: peat <subject>.\"}}'; fi; exit 0"
           }
         ]
       }
@@ -257,7 +265,7 @@ Every moment a session can produce or lose knowledge, and the hook that covers i
 Two behaviors worth knowing:
 
 - **peat never blocks.** A blocking Stop hook — exit 2 or `decision:block` — renders as a `hook error`, force-continues the turn, and displaces the reply the user was reading: it is enforcement machinery, wrong for soliciting judgment. Every peat prompt travels as `additionalContext` (invisible to the user, weighed by the agent in flow): the commit nudge, the post-compact nudge, and the once-per-session deposit reminder at the first user prompt. If the user can notice a hook, it is the wrong channel.
-- **Codex parity, verified end to end at 0.149.** Matchers and the stdin contract are identical (`session_id`, `transcript_path`, `cwd` all arrive as documented), and `SessionStart` stdout *is* injected into the Codex model's context — confirmed by running a real session whose model read back a marker that existed only inside the injected brief. The snippets differ only in the Stop rollout-path fallback. Two Codex-specific facts matter more than the parity itself: **hooks must be trusted before they run** (next section), and Codex's `SessionStart` `source` has no `compact` value, so the post-compact nudge is dormant there — `PreCompact` salvage still covers the mechanical half, and Codex has a dedicated `PostCompact` event that could carry the judged half (documented in its event list; not yet wired here).
+- **Codex parity, verified end to end at 0.149.** Matchers and the stdin contract are identical (`session_id`, `transcript_path`, `cwd` all arrive as documented), and `SessionStart` stdout *is* injected into the Codex model's context — confirmed by running a real session whose model read back a marker that existed only inside the injected brief. The snippets differ in two places: the Stop rollout-path fallback, and the `additionalContext` shape (**Stdout treatment**). Two Codex-specific facts matter more than the parity itself: **hooks must be trusted before they run** (next section), and the nudges must use Codex's nested output shape or Codex rejects them outright. Correcting an earlier claim in these docs: Codex's `SessionStart` `source` **does** include `compact`, and Codex runs those hooks before the next model request — delivering the context to the continuation even when compaction happens mid-turn — so the post-compact nudge is live on both fabrics. Codex additionally has a dedicated `PostCompact` event, not wired here.
 
 ## Worktree desks
 

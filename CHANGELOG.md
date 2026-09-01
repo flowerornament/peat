@@ -4,6 +4,10 @@ All notable changes to peat. The ledger is the API to our past; so is this file.
 
 Entries prefixed **Hooks:** mean the hook snippets changed: installed hooks are copied config, and you must re-sync them from `hooks/README.md` by hand. The snippet stamp there (`hooks snippet vN · date`) tells you which version you carry.
 
+## Unreleased
+
+- **Hooks: the Codex nudges used Claude's output shape and Codex rejected them (snippet v5, Codex only).** Claude Code accepts `additionalContext` as a top-level field; Codex requires it nested under `hookSpecificOutput` with a matching `hookEventName`. The Codex `PostToolUse` and `UserPromptSubmit` snippets sent the flat shape, so Codex failed them with `hook returned invalid post-tool-use JSON output` — once per matching tool call, loudly, in the user's face. Fixed and verified end to end: a real Codex session running `git commit` now reports `hook: PostToolUse Completed` with no error. **Re-copy the Codex snippet** (`hooks snippet v5`) and re-trust it in `/hooks`; the Claude snippet is unchanged at v4. Also corrected in the docs: Codex's `SessionStart` `source` *does* include `compact` — an earlier note here claimed otherwise — so the post-compact deposit nudge is live on both fabrics, not dormant on Codex.
+
 ## 0.2.2 — 2026-08-24
 
 - **Hooks: salvage captures now detach, and lock waits are bounded (snippet v4).** A `SessionEnd` or `PreCompact` capture used to hold the session open for the length of the capture — seconds, for a transcript peat had not seen before — so a harness tearing down a session would abort it with `Hook cancelled`. Both salvage hooks now spawn the capture detached and return in ~10 ms; the work completes in the background. The synchronous hooks additionally cap `PEAT_LOCK_WAIT_SECS` (15 s for the wake brief, 20 s for `Stop`), below any plausible hook deadline, so contention on a shared ledger skips quietly instead of surfacing as a cancelled hook. **Re-copy the v4 snippets from `hooks/README.md`** (and on Codex, re-trust them afterwards). Nothing was lost to the old behaviour: capture is idempotent, and `peat capture <transcript>` recovers any tail that was cut short.
