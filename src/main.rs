@@ -186,6 +186,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Fold the journal into the LSM now — the maintenance cost that
+    /// captures otherwise defer. Safe to run any time; takes minutes on a
+    /// large ledger, so run it when nothing is waiting on you
+    Compact,
     /// Time travel: the brief as it would have read at the end of DATE.
     /// Replays the ledger prefix through the same deterministic pipeline.
     Asof {
@@ -288,6 +292,40 @@ fn band_budget(flag: Option<usize>) -> usize {
 ///
 /// History: 1 = v0.1.x shapes (implicit — no marker file);
 /// 2 = `ObsRow`/`SubjStats` carry the deposit-time `Basis`.
+/// Checkpointing rotates the memtable and waits for the flush — and that
+/// flush rewrites index structures sized by the whole corpus, not by the
+/// delta just captured. On a large shared ledger it is tens of megabytes
+/// and minutes, spent inside whatever hook triggered it: a Stop capture of
+/// three new events would sit in `rotate_memtable_and_wait` while the user
+/// watched a frozen session (observed at 326 MB / ~67k events: >7 min for a
+/// 15-line delta).
+///
+/// So pay it when there is bulk work to justify it, or when the journal has
+/// grown enough that the next open would replay it anyway — and otherwise
+/// let the journal absorb the write. The tradeoff is deliberate: an
+/// un-checkpointed capture is durable across process exit (the journal is
+/// on disk and replayed on open) but not across power loss, and `peat
+/// compact` folds it on demand.
+const CHECKPOINT_MIN_EVENTS: usize = 500;
+const CHECKPOINT_JOURNAL_BYTES: u64 = 48 << 20;
+
+fn should_checkpoint(events: usize, journal_bytes: u64) -> bool {
+    events >= CHECKPOINT_MIN_EVENTS || journal_bytes >= CHECKPOINT_JOURNAL_BYTES
+}
+
+/// Bytes of unfolded journal beside the database (`*.jnl`).
+fn journal_bytes(db: &std::path::Path) -> u64 {
+    std::fs::read_dir(db)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "jnl"))
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 const VIEW_VERSION: u32 = 2;
 
 /// A path beside the db dir: `.peat/db` → `.peat/db<suffix>`.
@@ -470,10 +508,13 @@ fn main() {
                     tx.upsert(id, env);
                 }
             });
-            // fsync + let fjall fold the journal into the LSM — without this
-            // every subsequent open replays the whole journal, which after a
-            // bulk backfill dominates brief latency
-            st.checkpoint();
+            // fsync + fold the journal into the LSM — but only when the work
+            // justifies the stall it costs (see `should_checkpoint`); after a
+            // bulk backfill this is what keeps later opens from replaying the
+            // whole journal.
+            if should_checkpoint(n, journal_bytes(&db::db_path())) {
+                st.checkpoint();
+            }
             if let Some(p) = &cursor_path {
                 let _ = std::fs::create_dir_all(p.parent().unwrap());
                 let _ = std::fs::write(p, total_lines.to_string());
@@ -1117,6 +1158,21 @@ consider splitting into separate observations",
                     );
                 }
             }
+        }
+
+        Cmd::Compact => {
+            let before = journal_bytes(&db::db_path());
+            let phase = ui::Phase::new(&format!(
+                "folding {} MB of journal into the LSM",
+                before / (1 << 20)
+            ));
+            st.checkpoint();
+            phase.done();
+            ui::note(&format!(
+                "compacted — journal {} MB → {} MB",
+                before / (1 << 20),
+                journal_bytes(&db::db_path()) / (1 << 20)
+            ));
         }
 
         Cmd::Asof { date, task, json } => {

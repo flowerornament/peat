@@ -35,7 +35,7 @@ Sending Claude's flat shape to Codex is a hard error — `hook returned invalid 
 
 All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `READY` gates) go on top — see **Worktree desks**.
 
-<!-- hooks snippet v4 · 2026-08-24 · claude -->
+<!-- hooks snippet v6 · 2026-09-01 · claude -->
 
 ```json
 {
@@ -56,7 +56,7 @@ All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `RE
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && sh -mc \"nohup peat capture \\\"$tp\\\" >/dev/null 2>&1 &\" 2>/dev/null; exit 0"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && TP=\"$tp\" sh -mc 'nohup peat capture \"$TP\" >/dev/null 2>&1 &' 2>/dev/null; exit 0"
           }
         ]
       }
@@ -66,7 +66,7 @@ All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `RE
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && sh -mc \"nohup peat capture \\\"$tp\\\" >/dev/null 2>&1 &\" 2>/dev/null; exit 0"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && TP=\"$tp\" sh -mc 'nohup peat capture \"$TP\" >/dev/null 2>&1 &' 2>/dev/null; exit 0"
           }
         ]
       }
@@ -86,7 +86,7 @@ All six moments. Copy whole; per-project edits (shared-db `PEAT_DB` anchors, `RE
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); { [ -n \"$tp\" ] && PEAT_LOCK_WAIT_SECS=20 peat capture \"$tp\" --final-msg \"$fm\"; } 2>/dev/null || true"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); [ -n \"$tp\" ] && TP=\"$tp\" FM=\"$fm\" sh -mc 'nohup peat capture \"$TP\" --final-msg \"$FM\" >/dev/null 2>&1 &' 2>/dev/null; exit 0"
           }
         ]
       }
@@ -113,7 +113,7 @@ Near-identical contract (Codex ≥0.148 hooks engine is Claude-compatible: `post
 
 Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionStart]]` with `hooks = [{ type = "command", command = "…" }]`); the two forms are equivalent, and a layer carrying both loads both and warns. This file is the recommended form.
 
-<!-- hooks snippet v5 · 2026-08-31 · codex -->
+<!-- hooks snippet v6 · 2026-09-01 · codex -->
 
 ```json
 {
@@ -134,7 +134,7 @@ Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionS
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && sh -mc \"nohup peat capture \\\"$tp\\\" >/dev/null 2>&1 &\" 2>/dev/null; exit 0"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && TP=\"$tp\" sh -mc 'nohup peat capture \"$TP\" >/dev/null 2>&1 &' 2>/dev/null; exit 0"
           }
         ]
       }
@@ -144,7 +144,7 @@ Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionS
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && sh -mc \"nohup peat capture \\\"$tp\\\" >/dev/null 2>&1 &\" 2>/dev/null; exit 0"
+            "command": "in=$(cat); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); [ -n \"$tp\" ] && TP=\"$tp\" sh -mc 'nohup peat capture \"$TP\" >/dev/null 2>&1 &' 2>/dev/null; exit 0"
           }
         ]
       }
@@ -164,7 +164,7 @@ Codex also accepts these hooks inline in `.codex/config.toml` (`[[hooks.SessionS
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); sid=$(printf '%s' \"$in\" | jq -r '.session_id // empty'); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); [ -z \"$tp\" ] && [ -n \"$sid\" ] && tp=$(find \"$HOME/.codex/sessions\" -name \"rollout-*${sid}*.jsonl\" 2>/dev/null | head -1); { [ -n \"$tp\" ] && PEAT_LOCK_WAIT_SECS=20 peat capture \"$tp\" --final-msg \"$fm\"; } 2>/dev/null || true"
+            "command": "in=$(cat); sid=$(printf '%s' \"$in\" | jq -r '.session_id // empty'); tp=$(printf '%s' \"$in\" | jq -r '.transcript_path // empty'); fm=$(printf '%s' \"$in\" | jq -r '.last_assistant_message // empty'); [ -z \"$tp\" ] && [ -n \"$sid\" ] && tp=$(find \"$HOME/.codex/sessions\" -name \"rollout-*${sid}*.jsonl\" 2>/dev/null | head -1); [ -n \"$tp\" ] && TP=\"$tp\" FM=\"$fm\" sh -mc 'nohup peat capture \"$TP\" --final-msg \"$FM\" >/dev/null 2>&1 &' 2>/dev/null; exit 0"
           }
         ]
       }
@@ -213,8 +213,13 @@ SessionEnd hook [...] failed: Hook cancelled
 
 That message means the hook was aborted, not that it failed. Two peat-side costs used to make it likely, and v4 removes both:
 
-- **Salvage captures now run detached.** `PreCompact` and `SessionEnd` spawn `peat capture` in its own process group and return in ~10 ms instead of holding the session open for the length of a capture. The work finishes in the background, so a teardown can no longer interrupt it. Their stdout was already discarded, so nothing is lost by not waiting.
+- **Every capture now runs detached.** `Stop`, `PreCompact`, and `SessionEnd` spawn `peat capture` in its own process group and return in ~30 ms instead of holding the session open for the length of a capture. The work finishes in the background, so neither a teardown nor a slow capture can be seen from the session. Their stdout was already discarded, so nothing is lost by not waiting.
+
+  `Stop` passes the closing message, and a final message is arbitrary text — quotes, backticks, `$VAR`, backslashes. It travels to the background process **through the environment** (`TP=… FM=… sh -mc 'nohup peat capture "$TP" --final-msg "$FM" …'`), never re-quoted into a command string. Round-tripping a deliberately hostile message through that path is part of the hook tests; re-quoting it would be an injection bug, not just a formatting one.
+
 - **Lock waits are bounded below the deadline.** peat waits politely for the single-writer lock (`PEAT_LOCK_WAIT_SECS`, default 120 s — correct for a human at a terminal, far too patient for a hook). The synchronous hooks now cap it: 15 s for the wake brief, 20 s for the `Stop` capture. Past that peat exits `EX_TEMPFAIL` and the hook skips silently, which is the intended behaviour on a busy shared ledger — a skipped capture heals on the next one.
+
+Why a capture can be slow at all: writing to the ledger periodically has to fold the journal into the LSM, and that fold rewrites index structures sized by the whole corpus rather than by the events just captured. peat amortizes it — a capture folds only when it did bulk work or when the journal has grown enough that the next open would replay it anyway — so the cost lands rarely and, because every capture is detached, never where anyone waits on it. It is automatic; there is nothing to run on a schedule. (`peat compact` exists to force a fold deliberately, for after a large backfill. Needing it routinely would be a bug.)
 
 What a capture costs, measured on a 147 MB shared ledger: a **cold** capture of a 12.8 MB / 5,031-line transcript takes ~6 s, while a warm re-capture of the same file takes ~0.3 s. The gap is the per-transcript cursor, so the expensive case is a transcript peat has never seen — which is exactly what a `--resume` of a long-lived session hands to `SessionEnd`.
 

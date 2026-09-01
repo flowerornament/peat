@@ -660,3 +660,41 @@ fn view_rebuild_replays_the_ledger() {
     assert_eq!(head.text, "anchored claim");
     assert_eq!(head.basis.unwrap().commit, "abcdef0123456789");
 }
+
+// ---------------------------------------------------- checkpoint policy
+//
+// Checkpointing costs a corpus-sized flush, so a capture pays it only when
+// the work justifies it. The failure this encodes: a Stop hook capturing a
+// 15-line delta sat >7 minutes in fjall's `rotate_memtable_and_wait`,
+// visibly freezing the session it was supposed to be invisible to.
+
+#[test]
+fn small_captures_do_not_checkpoint() {
+    // the per-turn case: a handful of events, a fresh journal
+    assert!(!crate::should_checkpoint(3, 0));
+    assert!(!crate::should_checkpoint(12, 5 << 20));
+    assert!(!crate::should_checkpoint(499, 47 << 20));
+}
+
+#[test]
+fn bulk_or_grown_journal_checkpoints() {
+    // bulk backfill: worth folding immediately
+    assert!(crate::should_checkpoint(500, 0));
+    assert!(crate::should_checkpoint(50_000, 0));
+    // small delta, but the journal would dominate the next open
+    assert!(crate::should_checkpoint(1, 48 << 20));
+    assert!(crate::should_checkpoint(0, 200 << 20));
+}
+
+#[test]
+fn journal_bytes_sums_only_jnl_files() {
+    let dir = tmp();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("3.jnl"), vec![0u8; 2048]).unwrap();
+    std::fs::write(dir.join("4.jnl"), vec![0u8; 1024]).unwrap();
+    std::fs::write(dir.join("lock"), vec![0u8; 4096]).unwrap();
+    std::fs::create_dir_all(dir.join("keyspaces")).unwrap();
+    assert_eq!(crate::journal_bytes(&dir), 3072);
+    // a missing directory is not an error — capture must never be fatal
+    assert_eq!(crate::journal_bytes(&dir.join("nope")), 0);
+}
