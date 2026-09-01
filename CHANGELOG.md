@@ -4,7 +4,7 @@ All notable changes to peat. The ledger is the API to our past; so is this file.
 
 Entries prefixed **Hooks:** mean the hook snippets changed: installed hooks are copied config, and you must re-sync them from `hooks/README.md` by hand. The snippet stamp there (`hooks snippet vN · date`) tells you which version you carry.
 
-## Unreleased
+## 0.2.4 — 2026-09-01
 
 - **Captures no longer force a corpus-sized flush on every turn (snippet v6).** Each `peat capture` unconditionally checkpointed, and a checkpoint rotates the memtable and *waits* for a flush that rewrites index structures sized by the whole ledger — not by the delta. On a 326 MB / ~67k-event shared ledger that meant a `Stop` hook ingesting a 15-line delta sat over seven minutes inside fjall's `rotate_memtable_and_wait`, holding the write lock and visibly freezing the session (caught live: 0 % CPU, lock held, stack in `rotate_memtable_and_wait`). Capture now folds the journal only when the work justifies it — a bulk ingest, or a journal grown past ~48 MB — and otherwise lets the journal absorb the write, which is what the next open replays anyway. The tradeoff is deliberate and documented: an un-folded capture is durable across process exit but not across power loss.
 - **Every capture hook is now detached, including `Stop`.** No hook waits on a capture any more, so even the rare fold happens where nobody is watching; hooks return in ~30 ms. The closing message reaches the background process through the environment rather than being re-quoted into a command string — a hostile final message (quotes, backticks, `$VAR`, backslashes) now round-trips byte-exact, which the tests assert.
