@@ -154,7 +154,7 @@ pub fn file_session(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, String
 /// beliefs, session summaries, and short user messages (directives read
 /// like "ground in the formal model" — short by nature). Long user
 /// messages are pasted walls: keyword-searchable via Bm25, but not worth
-/// the O(n) graph rebuild a query pays.
+/// the row every exact-scan query has to read.
 pub const EMBED_USER_MAX: usize = 400;
 
 pub fn embeddable(t: &Keyed<EventId, TextRow>) -> Option<Keyed<EventId, [f32; ese::DIMENSIONS]>> {
@@ -300,14 +300,19 @@ macro_rules! peat_pipeline {
                         },
                         terminal::search::Bm25::new("kw"),
                     ),
+                    // exact scan over the persisted rows — no in-memory graph to
+                    // rebuild per process. Same keyspace and row bytes as the
+                    // Hnsw sink it replaced, so the swap needed no view rebuild.
+                    // See .design/2026-09-02-vector-index-flat-then-graph-in-store.md
                     FilterMap::new(
                         p::embeddable,
-                        terminal::search::Hnsw::<
+                        terminal::search::Flat::<
                             $crate::event::EventId,
                             f32,
                             ::anny::metric::Cosine,
                             { ese::DIMENSIONS },
-                        >::new("vec", ::anny::metric::Cosine, 42),
+                            10,
+                        >::new("vec", ::anny::metric::Cosine),
                     ),
                     terminal::Table::new("texts"),
                 ),

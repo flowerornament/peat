@@ -40,7 +40,7 @@ Envelope @ (session, seq)
  ├─ day buckets      → Aggregate("days")        → Table      per-day digest: tools, fails, commits, files
  ├─ file touches     → Multimap("file_sessions")             file ↔ session index
  ├─ searchable text  → Bm25("kw")                            keyword index: obs, said, user, final, compact
- │        └─ distilled only → ese → Hnsw("vec")              vector index: obs + final messages only
+ │        └─ distilled only → ese → Flat("vec")              exact-scan vector lane: obs + final messages only
  │        └─ Table("texts")                                  hydration rows (kind, age, cited)
  ├─ observations     → Aggregate("subj") → Table("subjects") current understanding, newest wins
  │        └─ Multimap("evidence")                            full per-subject obs trail

@@ -326,6 +326,11 @@ fn journal_bytes(db: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Rows in the vector lane above which the exact scan is past its design
+/// point and the store-resident graph (spec 2026-09-02, B′) is due. Measured
+/// growth puts this 18+ months out; a 10× fabric reaches it within a year.
+const FLAT_LANE_TRIP_WIRE: usize = 100_000;
+
 const VIEW_VERSION: u32 = 2;
 
 /// A path beside the db dir: `.peat/db` → `.peat/db<suffix>`.
@@ -681,9 +686,13 @@ consider splitting into separate observations",
                 basis: Option<String>,
                 text: String,
             }
-            let hits: Vec<Hit> = st.rtx(|(days, _, (kw, vec, texts), _, _, ledger)| {
+            let (hits, lane) = st.rtx(|(days, _, (kw, vec, texts), _, _, ledger)| {
                 let day_commits: DayCommits = days.iter().collect();
-                brief::rrf(
+                // the vector lane is an exact scan; this count is the
+                // trip-wire for building the store-resident graph (spec
+                // 2026-09-02). It appears where the cost is felt, nowhere else.
+                let lane = vec.len();
+                let hits: Vec<Hit> = brief::rrf(
                     &kw.search(&query, limit * 2),
                     &vec.search(&ese::encode_single(&query)),
                 )
@@ -715,8 +724,15 @@ consider splitting into separate observations",
                     })
                 })
                 .take(limit)
-                .collect()
+                .collect();
+                (hits, lane)
             });
+            if lane > FLAT_LANE_TRIP_WIRE {
+                ui::note(&format!(
+                    "vector lane holds {lane} rows — past the exact scan's design point; \
+time to build the store-resident graph (.design/2026-09-02-vector-index-flat-then-graph-in-store.md)"
+                ));
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&hits).unwrap());
             } else if hits.is_empty() {

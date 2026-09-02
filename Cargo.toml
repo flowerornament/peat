@@ -10,9 +10,9 @@ publish = false
 # fold/ese/anny live in the bogkit fork (upstream PR: flowercomputers/bogkit#18).
 # Pinned by rev — bump deliberately; repoint to upstream if/when the PR merges.
 [dependencies]
-anny = { git = "https://github.com/flowerornament/bogkit", rev = "328e9a11c20f653193c7bd1c77981733226a6397" }
-ese = { git = "https://github.com/flowerornament/bogkit", rev = "328e9a11c20f653193c7bd1c77981733226a6397", features = ["dim-512", "quant-8"] }
-fold = { git = "https://github.com/flowerornament/bogkit", rev = "328e9a11c20f653193c7bd1c77981733226a6397" }
+anny = { git = "https://github.com/flowerornament/bogkit", rev = "170d00d019c0fbd189688785babacedf57509e5d" }
+ese = { git = "https://github.com/flowerornament/bogkit", rev = "170d00d019c0fbd189688785babacedf57509e5d", features = ["dim-512", "quant-8"] }
+fold = { git = "https://github.com/flowerornament/bogkit", rev = "170d00d019c0fbd189688785babacedf57509e5d" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }

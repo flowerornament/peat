@@ -698,3 +698,50 @@ fn journal_bytes_sums_only_jnl_files() {
     // a missing directory is not an error — capture must never be fatal
     assert_eq!(crate::journal_bytes(&dir.join("nope")), 0);
 }
+
+// ------------------------------------------------------- vector lane (Flat)
+//
+// The vector lane is an exact scan over persisted rows (spec 2026-09-02).
+// What that buys, asserted: identical rankings across two opens of the same
+// ledger — there is no in-memory graph whose build order could differ.
+
+#[test]
+fn vector_lane_is_deterministic_across_opens() {
+    let dir = tmp();
+    let first = {
+        let mut st = open!(&dir);
+        st.wtx(|tx| {
+            for (n, text) in [
+                "the retraction oracle must be red-capable",
+                "checkpoint only when the work justifies the flush",
+                "codex skips untrusted hooks silently",
+                "hook commands must invoke bare peat from PATH",
+                "views rebuild themselves from the ledger",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (id, e) = obs("s", n as u32, DAY_MS * (n as u64 + 1), "subj", text);
+                tx.upsert(&id, &e);
+            }
+        });
+        st.checkpoint();
+        st.rtx(|(_, _, (_, vec, _), _, _, _)| {
+            vec.search(&ese::encode_single("hooks that fail silently"))
+                .into_iter()
+                .map(|h| h.val)
+                .collect::<Vec<EventId>>()
+        })
+    };
+    let second = {
+        let st = open!(&dir);
+        st.rtx(|(_, _, (_, vec, _), _, _, _)| {
+            vec.search(&ese::encode_single("hooks that fail silently"))
+                .into_iter()
+                .map(|h| h.val)
+                .collect::<Vec<EventId>>()
+        })
+    };
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 5);
+}

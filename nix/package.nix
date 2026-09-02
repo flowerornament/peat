@@ -22,9 +22,9 @@ pkgs.rustPlatform.buildRustPackage {
     # fold/ese/anny come from the bogkit fork, pinned by rev in Cargo.toml.
     # Bumping the pin means updating this hash (nix build reports the new one).
     outputHashes = {
-      "anny-0.0.1" = "sha256-/rMSQuuDrBqe9xov3AWqXiKjCQ8JcsHGDSxq8w8ye2o=";
-      "ese-0.1.0" = "sha256-/rMSQuuDrBqe9xov3AWqXiKjCQ8JcsHGDSxq8w8ye2o=";
-      "fold-0.0.1" = "sha256-/rMSQuuDrBqe9xov3AWqXiKjCQ8JcsHGDSxq8w8ye2o=";
+      "anny-0.0.1" = "sha256-xQuSOsj+zSOTJeX3Via+4jdGtPqxHMlofgaGiPYf6DI=";
+      "ese-0.1.0" = "sha256-xQuSOsj+zSOTJeX3Via+4jdGtPqxHMlofgaGiPYf6DI=";
+      "fold-0.0.1" = "sha256-xQuSOsj+zSOTJeX3Via+4jdGtPqxHMlofgaGiPYf6DI=";
     };
   };
 

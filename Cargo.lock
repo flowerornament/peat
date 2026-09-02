@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "anny"
 version = "0.0.1"
-source = "git+https://github.com/flowerornament/bogkit?rev=328e9a11c20f653193c7bd1c77981733226a6397#328e9a11c20f653193c7bd1c77981733226a6397"
+source = "git+https://github.com/flowerornament/bogkit?rev=170d00d019c0fbd189688785babacedf57509e5d#170d00d019c0fbd189688785babacedf57509e5d"
 
 [[package]]
 name = "anstream"
@@ -295,7 +295,7 @@ dependencies = [
 [[package]]
 name = "ese"
 version = "0.1.0"
-source = "git+https://github.com/flowerornament/bogkit?rev=328e9a11c20f653193c7bd1c77981733226a6397#328e9a11c20f653193c7bd1c77981733226a6397"
+source = "git+https://github.com/flowerornament/bogkit?rev=170d00d019c0fbd189688785babacedf57509e5d#170d00d019c0fbd189688785babacedf57509e5d"
 dependencies = [
  "minreq",
  "serde_json",
@@ -343,7 +343,7 @@ dependencies = [
 [[package]]
 name = "fold"
 version = "0.0.1"
-source = "git+https://github.com/flowerornament/bogkit?rev=328e9a11c20f653193c7bd1c77981733226a6397#328e9a11c20f653193c7bd1c77981733226a6397"
+source = "git+https://github.com/flowerornament/bogkit?rev=170d00d019c0fbd189688785babacedf57509e5d#170d00d019c0fbd189688785babacedf57509e5d"
 dependencies = [
  "anny",
  "fjall",
