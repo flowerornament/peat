@@ -4,7 +4,7 @@ All notable changes to peat. The ledger is the API to our past; so is this file.
 
 Entries prefixed **Hooks:** mean the hook snippets changed: installed hooks are copied config, and you must re-sync them from `hooks/README.md` by hand. The snippet stamp there (`hooks snippet vN · date`) tells you which version you carry.
 
-## Unreleased
+## 0.3.0 — 2026-09-02
 
 - **The vector lane no longer rebuilds an index per process.** fold's Hnsw sink keeps its graph in memory and rebuilt it from the persisted rows on first use in every `peat` invocation — O(n log n) before any O(1) work, measured at 8.9 s for 7,369 vectors and linear in n, so `obs`, `recall`, and `brief <words>` all paid it (wake briefs, which don't embed, did not). The lane is now an exact scan over the same persisted rows (`fold::terminal::search::Flat`, new in the bogkit fork): 0.1 ms of arithmetic at that size, ~1 ms at 50k, with reading the rows as its only real cost. Rows are byte-identical to the old sink's and the keyspace is unchanged, so **no view rebuild happens** — existing ledgers are read as they are (tested: the new sink reads and deletes rows the old one wrote). Results are now exact and order-independent rather than approximate, which makes `asof` stricter. A trip-wire in `recall` names the successor design when a ledger passes 100k vectors; see `.design/2026-09-02-vector-index-flat-then-graph-in-store.md` for the measurements, the six designs compared, and the store-resident graph this is layer one of.
 
