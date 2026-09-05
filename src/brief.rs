@@ -35,6 +35,33 @@ pub fn rrf(kw: &[Scored<f64, EventId>], vec: &[Scored<f32, EventId>]) -> Vec<(Ev
     fused
 }
 
+/// The session a resuming agent should read as "last": the newest closed
+/// session (one with a final message) whose cwd lies under `desk`. Several
+/// desks share one ledger, so the newest closed session overall is often
+/// another seat's; that one is the fallback only when this desk has none,
+/// flagged `false` so it is never presented as this desk's own. `sess` is
+/// newest-first.
+pub fn last_session<'a>(
+    sess: &'a [(String, SessStats)],
+    desk: &std::path::Path,
+) -> Option<(&'a SessStats, bool)> {
+    let mut closed = sess
+        .iter()
+        .map(|(_, s)| s)
+        .filter(|s| !s.final_msg.is_empty());
+    let newest = closed.clone().next()?;
+    // the desk comes from getcwd (symlinks resolved); a recorded cwd may
+    // name a symlinked desk (`murail-dev -> murail-2a`), so resolve it too
+    let under = |cwd: &str| {
+        let p = std::path::Path::new(cwd);
+        p.starts_with(desk) || p.canonicalize().is_ok_and(|c| c.starts_with(desk))
+    };
+    match closed.find(|s| under(&s.cwd)) {
+        Some(s) => Some((s, true)),
+        None => Some((newest, false)),
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct Brief {
     pub today: String,
@@ -65,6 +92,7 @@ pub fn assemble<R: Readable>(
     subjects: &TableReader<'_, R, String, SubjStats>,
     evidence: &MultimapReader<'_, R, String, ObsRow>,
     sessions: &TableReader<'_, R, String, SessStats>,
+    desk: &std::path::Path,
 ) -> Brief {
     let today_bucket = now / DAY_MS;
 
@@ -123,16 +151,15 @@ pub fn assemble<R: Readable>(
         })
         .collect();
 
-    let last_session = sess
-        .iter()
-        .find(|(_, s)| !s.final_msg.is_empty())
-        .map(|(_, s)| {
-            serde_json::json!({
-                "age": age_label(now, s.end_ms),
-                "branch": s.branch,
-                "final_msg": s.final_msg,
-            })
-        });
+    let last_session = last_session(&sess, desk).map(|(s, here)| {
+        serde_json::json!({
+            "age": age_label(now, s.end_ms),
+            "branch": s.branch,
+            "final_msg": s.final_msg,
+            "where": s.cwd.rsplit('/').next().unwrap_or(&s.cwd),
+            "here": here,
+        })
+    });
 
     // ---- files: most-touched over the digest window, with their sessions
     let mut touch: HashMap<String, i64> = HashMap::new();

@@ -2,7 +2,13 @@
 
 All notable changes to peat. The ledger is the API to our past; so is this file.
 
-Entries prefixed **Hooks:** mean the hook snippets changed: installed hooks are copied config, and you must re-sync them from `hooks/README.md` by hand. The snippet stamp there (`hooks snippet vN · date`) tells you which version you carry.
+Entries prefixed **Hooks:** touch the hook contract. Since 0.3.1 every hook is the constant command `peat hook` and its behaviour ships with the binary, so an upgrade needs no re-sync; before that, hooks were copied bash snippets stamped `hooks snippet vN` and had to be re-copied by hand.
+
+## Unreleased
+
+- **Hooks: one verb. `peat hook` replaces every copied bash snippet.** Each of the six hook moments used to be a distinct block of `jq` / `nohup` / `sh -mc` shell, copied per project and then patched per desk with `PEAT_DB` anchors and `READY` gates — six blocks, two fabrics, and a `/hooks` re-trust on Codex after every release. The harness already names the moment in the stdin JSON (`hook_event_name`), so one command can serve them all: `peat hook` reads stdin, dispatches, and does in-process what the shell did — writes the session id, prints the brief (lock wait capped at 15 s), emits the once-per-session and post-commit nudges, and detaches captures with the closing message passed as argv, never re-quoted. `peat hook install [--codex|--local] [--check|--print]` merges the wiring into the harness config, keeps other tools' hooks, and strips legacy peat snippets (the `bd setup claude` shape). The `READY` gate becomes its inverse, `.peat/off`; a desk with no ledger is a silent no-op. Existing installs: run `peat hook install` once per desk (`--local` where the old hooks lived in `settings.local.json`, `--codex` for Codex, then one last `/hooks` trust).
+- **A peat skill, shipped in the binary.** `skills/peat/SKILL.md` is the judgment half the hooks cannot enforce: read the brief before acting, how far to trust a cited vs uncited line, the discipline for a claim (a rule, no deixis, findable names, cite with `--from`), and what not to do (`capture` by hand, session summaries as observations). `peat hook install` lays it at `.claude/skills/peat/` (`--codex`: `.agents/skills/peat/`) beside the hooks, `--check` reports staleness, and `peat skill` prints it. Under 4 KB; it defers the surface to `peat --help` and the handles every line already ends in.
+- **Worktrees find their anchor without a redirect.** A git worktree (`.git` file) or secondary jj workspace (`.jj/repo` file) with no ledger and no `.peat/redirect` resolves to the main checkout's `.peat/db` when it exists. Desks Claude Code creates under `.claude/worktrees/` — which used to need a hardcoded `PEAT_DB` in the hook — now remember into the shared ledger with no setup. Explicit `PEAT_DB` and `.peat/redirect` still win.
 
 ## 0.3.0 — 2026-09-02
 

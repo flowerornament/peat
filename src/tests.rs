@@ -745,3 +745,40 @@ fn vector_lane_is_deterministic_across_opens() {
     assert_eq!(first, second);
     assert_eq!(first.len(), 5);
 }
+
+#[test]
+fn last_session_prefers_this_desk_on_a_shared_ledger() {
+    use crate::pipeline::SessStats;
+    let s = |cwd: &str, end_ms: u64, msg: &str| SessStats {
+        end_ms,
+        cwd: cwd.into(),
+        final_msg: msg.into(),
+        ..Default::default()
+    };
+    // newest-first, as the brief sorts them; herald-2a closed most recently
+    let sess = vec![
+        ("a".to_string(), s("/code/herald-1a", 40, "")),
+        (
+            "b".to_string(),
+            s("/code/herald-2a/lib", 30, "2a's summary"),
+        ),
+        (
+            "c".to_string(),
+            s("/code/herald-1a/test", 20, "1a's summary"),
+        ),
+        ("d".to_string(), s("/code/herald", 10, "main's summary")),
+    ];
+    let pick = |desk: &str| {
+        crate::brief::last_session(&sess, std::path::Path::new(desk))
+            .map(|(s, here)| (s.final_msg.as_str(), here))
+    };
+    assert_eq!(pick("/code/herald-1a"), Some(("1a's summary", true)));
+    // a sibling desk sharing a name prefix is not under this desk
+    assert_eq!(pick("/code/herald"), Some(("main's summary", true)));
+    // a desk with no closed session of its own falls back, flagged
+    assert_eq!(pick("/code/herald-0b"), Some(("2a's summary", false)));
+    assert_eq!(
+        crate::brief::last_session(&[], std::path::Path::new("/x")).map(|_| ()),
+        None
+    );
+}

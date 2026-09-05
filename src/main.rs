@@ -20,6 +20,7 @@
 pub mod brief;
 pub mod db;
 pub mod event;
+mod hook;
 pub mod ladder;
 pub mod pipeline;
 pub mod transcript;
@@ -143,6 +144,9 @@ enum Cmd {
         /// (whole history always covered; default 8, or PEAT_BRIEF_BUDGET)
         #[arg(long)]
         budget: Option<usize>,
+        /// A trailing line the hook appends (the post-compaction nudge)
+        #[arg(skip)]
+        after: Option<&'static str>,
     },
     /// Search memory (what `peat <words>` runs): hybrid keyword+semantic,
     /// each hit tagged [kind · age] and addressed
@@ -199,6 +203,95 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The one command every harness hook runs. Reads the hook's stdin
+    /// JSON, dispatches on hook_event_name, never fails the session:
+    /// SessionStart → brief (+ session id); UserPromptSubmit → one deposit
+    /// nudge per session; PostToolUse → nudge after a commit; Stop /
+    /// PreCompact / SessionEnd → detached capture
+    /// Print the peat skill (the judgment half: when to read, how to
+    /// deposit, how far to trust a line). `peat hook install` lays it
+    /// beside the hooks where the harness discovers it
+    Skill,
+    Hook {
+        /// Override the event (default: stdin's hook_event_name)
+        #[arg(long)]
+        event: Option<String>,
+        #[command(subcommand)]
+        cmd: Option<HookCmd>,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum HookCmd {
+    /// Wire `peat hook` into .claude/settings.json (or .codex/hooks.json)
+    /// at the desk root and lay the peat skill beside it — merges, keeps
+    /// other hooks, replaces any copied peat bash snippets, idempotent
+    Install {
+        /// Target Codex (.codex/hooks.json) instead of Claude Code
+        #[arg(long, conflicts_with = "local")]
+        codex: bool,
+        /// Target Claude Code's git-ignored .claude/settings.local.json
+        #[arg(long)]
+        local: bool,
+        /// Report whether the hooks are installed; exit 1 if not
+        #[arg(long)]
+        check: bool,
+        /// Print the snippet instead of writing it
+        #[arg(long)]
+        print: bool,
+    },
+}
+
+/// `peat hook install`: the desk root is the directory holding `.peat`.
+fn hook_install(sub: HookCmd) {
+    let HookCmd::Install {
+        codex,
+        local,
+        check,
+        print,
+    } = sub;
+    let fabric = if codex {
+        hook::Fabric::Codex
+    } else if local {
+        hook::Fabric::ClaudeLocal
+    } else {
+        hook::Fabric::Claude
+    };
+    if print {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&hook::snippet()).unwrap()
+        );
+        return;
+    }
+    let root = db::peat_dir()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap());
+    if !check {
+        // the hooks are a no-op until a ledger exists here: create it
+        migrate_views(&db::db_path());
+        drop(db::open(db::db_path(), || peat_pipeline!()));
+    }
+    let skill = hook::install_skill(&root, fabric, check);
+    match hook::install(&root, fabric, check).and_then(|h| skill.map(|s| (h, s))) {
+        Ok((line, skill_line)) => {
+            println!("{line}");
+            println!("{skill_line}");
+            if !check {
+                println!("  {} hook on: {}", fabric.name(), hook::EVENTS.join(", "));
+                if codex {
+                    println!(
+                        "  Codex runs no hook until it is trusted: open /hooks in the Codex CLI and trust it"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            ui::error(&e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -226,6 +319,7 @@ macro_rules! make_brief {
                     &subjects,
                     &evidence,
                     &sessions,
+                    db::peat_dir().parent().unwrap_or(std::path::Path::new("/")),
                 )
             },
         )
@@ -407,6 +501,38 @@ sessions, re-run `peat capture` on their transcripts to backfill",
 
 fn main() {
     let cli = Cli::parse();
+
+    // hooks run under a harness deadline and mostly need no ledger at
+    // all; handle them before the open, and cap the wait when they do
+    let cli = match cli.cmd {
+        Some(Cmd::Hook { cmd: Some(sub), .. }) => {
+            hook_install(sub);
+            return;
+        }
+        Some(Cmd::Skill) => {
+            print!("{}", hook::SKILL);
+            return;
+        }
+        Some(Cmd::Hook { event, cmd: None }) => match hook::run(event) {
+            hook::Action::Brief { compacted } => {
+                let _ = db::LOCK_WAIT_SECS.set(15);
+                Cli {
+                    query: vec![],
+                    json: false,
+                    budget: None,
+                    cmd: Some(Cmd::Brief {
+                        task: vec![],
+                        json: false,
+                        budget: None,
+                        after: compacted.then_some(hook::NUDGE_COMPACT),
+                    }),
+                }
+            }
+            _ => return,
+        },
+        _ => cli,
+    };
+
     migrate_views(&db::db_path());
     let mut st = db::open(db::db_path(), || peat_pipeline!());
 
@@ -421,6 +547,7 @@ fn main() {
             task: vec![],
             json: cli.json,
             budget: cli.budget,
+            after: None,
         },
         None => {
             let q = &cli.query;
@@ -639,10 +766,21 @@ consider splitting into separate observations",
             ui::note(&format!("recorded → {subject} (support {count})"));
         }
 
-        Cmd::Brief { task, json, budget } => {
+        Cmd::Brief {
+            task,
+            json,
+            budget,
+            after,
+        } => {
             let brief = make_brief!(st, &task.join(" "), now_ms(), band_budget(budget));
             brief::emit(&brief, json);
+            if let Some(line) = after {
+                println!();
+                println!("{line}");
+            }
         }
+
+        Cmd::Hook { .. } | Cmd::Skill => unreachable!("handled before the ledger opens"),
 
         Cmd::Recall {
             query,

@@ -16,6 +16,11 @@ use crate::ui;
 /// anchor so every seat reads and writes one shared memory, while
 /// desk-local files (`current-session`, the once-per-session markers)
 /// stay beside the redirect.
+///
+/// A git worktree or secondary jj workspace with no ledger and no
+/// redirect of its own resolves to its anchor repo's ledger automatically
+/// (when that one exists), so a desk Claude Code or jj created on the fly
+/// remembers into the same mind without any per-desk setup.
 pub fn db_path() -> PathBuf {
     if let Ok(p) = std::env::var("PEAT_DB") {
         return PathBuf::from(p);
@@ -28,8 +33,62 @@ pub fn db_path() -> PathBuf {
             return base.join(target).join("db");
         }
     }
-    dir.join("db")
+    let local = dir.join("db");
+    if !local.is_dir()
+        && let Some(anchor) = worktree_anchor(dir.parent().unwrap_or(&dir))
+    {
+        let shared = anchor.join(".peat").join("db");
+        if shared.is_dir() {
+            return shared;
+        }
+    }
+    local
 }
+
+/// The main repository root of a git worktree (`.git` is a file naming
+/// `<main>/.git/worktrees/<name>`) or a secondary jj workspace
+/// (`.jj/repo` is a file naming `<main>/.jj/repo`). `None` for the main
+/// checkout itself, or outside any repo.
+pub fn worktree_anchor(root: &std::path::Path) -> Option<PathBuf> {
+    let git = root.join(".git");
+    if git.is_file() {
+        let text = std::fs::read_to_string(&git).ok()?;
+        let target = text.trim().strip_prefix("gitdir:")?.trim();
+        let target = root.join(target);
+        // …/<main>/.git/worktrees/<name>
+        let main = target.parent()?.parent()?.parent()?;
+        return Some(main.to_path_buf());
+    }
+    let jj = root.join(".jj").join("repo");
+    if jj.is_file() {
+        let text = std::fs::read_to_string(&jj).ok()?;
+        let target = root.join(".jj").join(text.trim());
+        // …/<main>/.jj/repo
+        let main = target.parent()?.parent()?;
+        return Some(normalize(main));
+    }
+    None
+}
+
+/// Lexically resolve `..` components (canonicalize would follow symlinks
+/// and fail on a missing path; neither is wanted here).
+fn normalize(p: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A process-wide cap on the lock wait, set by callers that run under a
+/// harness deadline (`peat hook`). Wins over `PEAT_LOCK_WAIT_SECS`.
+pub static LOCK_WAIT_SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 /// `.peat/` beside the nearest git/jj root above cwd, else cwd. Cached —
 /// callers hit this several times per invocation and the answer is fixed.
@@ -104,9 +163,14 @@ pub fn open<P>(path: PathBuf, make: impl Fn() -> P) -> KeyedStream<EventId, Enve
 where
     P: Push<Keyed<EventId, Envelope>>,
 {
-    let wait_max_ms: u64 = std::env::var("PEAT_LOCK_WAIT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    let wait_max_ms: u64 = LOCK_WAIT_SECS
+        .get()
+        .copied()
+        .or_else(|| {
+            std::env::var("PEAT_LOCK_WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
         .unwrap_or(120u64)
         * 1000;
 
@@ -171,4 +235,37 @@ minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
     };
     phase.done();
     st
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    #[test]
+    fn worktree_anchor_reads_git_and_jj_pointer_files() {
+        let tmp = std::env::temp_dir().join(format!("peat-anchor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let main = tmp.join("main");
+        let wt = tmp.join("main").join(".claude").join("worktrees").join("x");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}/.git/worktrees/x\n", main.display()),
+        )
+        .unwrap();
+        assert_eq!(worktree_anchor(&wt), Some(main.clone()));
+
+        let ws = tmp.join("main-dev");
+        std::fs::create_dir_all(ws.join(".jj")).unwrap();
+        std::fs::write(ws.join(".jj").join("repo"), "../../main/.jj/repo\n").unwrap();
+        assert_eq!(worktree_anchor(&ws), Some(main.clone()));
+
+        std::fs::create_dir_all(main.join(".git")).unwrap();
+        assert_eq!(
+            worktree_anchor(&main),
+            None,
+            "a real checkout has no anchor"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

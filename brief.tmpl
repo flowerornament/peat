@@ -22,7 +22,7 @@
 {%- endif %}
 {%- if last_session %}
 
-{{ "last session" | h1 }}{{ (" (" ~ last_session.age ~ (", " ~ last_session.branch if last_session.branch else "") ~ "):") | dim }}
+{{ ("last session" if last_session.here else "last session on another desk, " ~ last_session.where) | h1 }}{{ (" (" ~ last_session.age ~ (", " ~ last_session.branch if last_session.branch else "") ~ "):") | dim }}
   {{ last_session.final_msg | clip(400) }}
 {%- endif %}
 {%- if files %}

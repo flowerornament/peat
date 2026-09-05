@@ -108,7 +108,15 @@ $ cargo test              # one #[ignore]d twin is SUPPOSED to fail when run
 
 fold/ese/anny arrive as git dependencies pinned by rev to the [bogkit fork](https://github.com/flowerornament/bogkit) (upstream PR flowercomputers/bogkit#18).
 
-**Then install the hooks — they are the product.** peat without hooks is a CLI you must remember to run; the fabric (brief on wake, capture on stop, deposit nudges) is entirely the hooks. Copy the stamped snippets from [`hooks/README.md`](hooks/README.md) into `.claude/settings.json` (Claude Code) and/or `.codex/hooks.json` (Codex) in each project that should remember. Hooks are config you own, not something the binary manages: **when you upgrade peat, check the CHANGELOG for `Hooks:` entries** — they mean your installed snippets need re-syncing by hand. This is deliberate; there is no auto-install.
+**Then install the hooks — they are the product.** peat without hooks is a CLI you must remember to run; the fabric (brief on wake, capture on stop, deposit nudges) is entirely the hooks. In each project that should remember:
+
+```console
+$ peat hook install            # Claude Code: .claude/settings.json
+$ peat hook install --codex    # Codex: .codex/hooks.json (then trust it in /hooks)
+$ peat hook install --check    # is it wired?
+```
+
+Every hook is the same two words, `peat hook`: the binary reads the harness's stdin JSON, sees which moment it is, and does the right thing. Install merges into an existing file, keeps other tools' hooks, and replaces any peat bash snippet copied from an older release. It also lays the **peat skill** (`skills/peat/SKILL.md`, printable with `peat skill`) where the harness discovers it: the hooks cover the mechanical half, the skill teaches the judgment half — when to read, how to deposit, how far to trust a line. Because the hook config never changes again, upgrading the binary upgrades the hooks. See [`hooks/README.md`](hooks/README.md) for the contract.
 
 ## Usage
 
@@ -187,18 +195,18 @@ Reads every ledger event at or before the end of that **local** calendar day and
 
 ## Agent integration (Claude Code & Codex)
 
-Hook contract, stamped snippets, and the update story live in [`hooks/README.md`](hooks/README.md). The six-moment shape:
+One command, `peat hook`, is wired to six moments (`peat hook install` does the wiring); it reads the harness's stdin JSON and dispatches on `hook_event_name`. The contract and the moment-coverage matrix live in [`hooks/README.md`](hooks/README.md). The six-moment shape:
 
-| hook                 | does                                                                                                                                                   |
+| moment               | `peat hook` does                                                                                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SessionStart`       | writes `.peat/current-session`, runs `peat brief` — **stdout is injected into the session's context**; after a compaction, nudges deposit-from-summary |
+| `SessionStart`       | writes `.peat/current-session`, prints the brief — **stdout is injected into the session's context**; after a compaction, nudges deposit-from-summary  |
 | `UserPromptSubmit`   | once per session, invisible `additionalContext` nudge: deposit at natural completion points                                                            |
 | `PostToolUse` (Bash) | on `git commit`/`jj describe`/`just land`, nudges the agent (via `additionalContext`) to deposit an obs                                                |
-| `Stop`               | `peat capture` with `--final-msg` from `last_assistant_message` — **never blocks**                                                                     |
-| `PreCompact`         | salvage capture before the context window is replaced                                                                                                  |
-| `SessionEnd`         | salvage capture on `/clear` and other non-Stop endings                                                                                                 |
+| `Stop`               | detached capture, `--final-msg` from `last_assistant_message` — **never blocks**                                                                       |
+| `PreCompact`         | detached salvage capture before the context window is replaced                                                                                        |
+| `SessionEnd`         | detached salvage capture on `/clear` and other non-Stop endings                                                                                       |
 
-Codex ≥0.148 supports the same hook set and stdin contract; its snippet (one Stop fallback difference) is in `hooks/README.md`. **On Codex the hooks must also be trusted before they run** — copying the file installs nothing that fires; run `/hooks` in the Codex CLI to review and trust, and again after any re-sync, because trust is keyed to the hook's exact text. Two contract facts worth repeating: hooks receive **stdin JSON** (there are no `$CLAUDE_TRANSCRIPT_PATH`-style env vars), and every hook command must end `|| true` or `exit 0` — peat failing may never break a session.
+Codex ≥0.148 supports the same hook set and stdin contract; `peat hook install --codex` wires it, and the Stop rollout fallback is built in. **On Codex the hooks must also be trusted before they run** — installing writes nothing that fires; run `/hooks` in the Codex CLI to review and trust. Trust is keyed to the hook's exact text, and that text is now the constant `peat hook`, so this happens once per desk rather than after every peat release. peat failing may never break a session: `peat hook` exits 0 on every path, and does nothing at all where no ledger exists or a `.peat/off` marker is present.
 
 ## Multiple agents, one memory
 
@@ -208,7 +216,7 @@ Give each worktree desk a redirect to its anchor (the beads convention):
 $ printf '../murail/.peat\n' > .peat/redirect     # relative to the desk root
 ```
 
-Bare `peat` in that desk now reads and writes the shared ledger, while desk-local files (`current-session`, once-per-session markers) stay beside the redirect. `PEAT_DB=/path/to/.peat/db` remains the explicit override and is what hook snippets use. Writers queue on the single-writer lock (proven under 14-process load); the brief's *active in the last hour* section is the cross-agent awareness surface, and *current understanding* interleaves every agent's observations. Session exhaust from N agents becomes one mind.
+Bare `peat` and `peat hook` in that desk now read and write the shared ledger, while desk-local files (`current-session`, once-per-session markers) stay beside the redirect. A git worktree or secondary jj workspace needs no redirect at all: with no ledger of its own it resolves to its main checkout's `.peat/db` automatically, so a desk Claude Code or `jj workspace add` created on the fly remembers into the same mind. `PEAT_DB=/path/to/.peat/db` remains the explicit override. Writers queue on the single-writer lock (proven under 14-process load); the brief's *active in the last hour* section is the cross-agent awareness surface, and *current understanding* interleaves every agent's observations. Session exhaust from N agents becomes one mind.
 
 ## Output contract
 
