@@ -1,0 +1,43 @@
+name: Nix Cache
+
+# Release-tracking flake inputs build `release` with peat's own nixpkgs, so
+# publishing that output lets them substitute instead of compiling.
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-cache
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: release
+
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: flowerornament
+          skipPush: true
+
+      - name: Build, push and pin
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          out=$(nix build --no-link --print-out-paths .#packages.aarch64-darwin.default)
+          cachix push flowerornament "$out"
+          cachix pin flowerornament peat-aarch64-darwin "$out" --keep-revisions 3
+          curl -fsS "https://flowerornament.cachix.org/$(basename "$out" | cut -c1-32).narinfo" > /dev/null
+          echo "published $out" >> "$GITHUB_STEP_SUMMARY"

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Release helper for peat: bump / verify / notes / tag.
 
-A slim port of the nx-rs/anneal release machinery, minus their Nix-cache
-half (peat publishes GitHub Release binaries only) and jj-aware where they
-are git-aware. Version-bearing files: Cargo.toml, Cargo.lock, flake.nix
+A slim port of the nx-rs/anneal release machinery, jj-aware where they are
+git-aware. CI publishes GitHub Release binaries on the tag, and
+nix-cache.yml pushes the aarch64-darwin flake output to Cachix when
+`release` moves. Version-bearing files: Cargo.toml, Cargo.lock, flake.nix
 (peatVersion), CHANGELOG.md. `just release <v>` runs `tag`, which runs the
 full `verify` first; nothing tags unverified.
 """
