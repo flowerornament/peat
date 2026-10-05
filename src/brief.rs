@@ -10,9 +10,11 @@ use fold::pipeline::Scored;
 use fold::pipeline::terminal::{MultimapReader, TableReader};
 use fold::stream::Readable;
 
-use crate::event::EventId;
+use crate::event::{EventId, Lane};
 use crate::ladder;
-use crate::pipeline::{DAY_MS, DayStats, ObsRow, SessStats, SubjStats, TextRow};
+use crate::pipeline::{
+    DAY_MS, DayStats, DistRow, DistStats, ObsRow, SessStats, SubjStats, TextRow, standing,
+};
 use crate::transcript::{date_label, local_offset_ms};
 use crate::ui::{self, age_label, short_path, short_sess};
 
@@ -62,9 +64,83 @@ pub fn last_session<'a>(
     }
 }
 
+/// How many standing rulings and open loops the wake prints before it
+/// points at the full register.
+const RULINGS_SHOWN: usize = 20;
+const LOOPS_SHOWN: usize = 12;
+/// A loop nobody has touched for this long is more likely forgotten than
+/// live. It stays open on the record (`peat loops`) but leaves the wake:
+/// a list of stale reminders teaches its reader to skip the list.
+const LOOP_FRESH_MS: u64 = 30 * DAY_MS;
+
+/// Kinds worth pushing unasked: distilled or judged text, never the raw
+/// firehose (user messages, mid-task chatter).
+const PUSH_KINDS: [&str; 6] = ["ruling", "loop", "digest", "obs", "final", "compact"];
+
+/// What to put in front of an agent the moment a prompt arrives: hits the
+/// keyword and vector lanes *agree* on, from other sessions, not already
+/// pushed. Agreement is the precision gate — an unasked line costs
+/// attention, so one lane's guess is not enough.
+#[allow(clippy::too_many_arguments)]
+pub fn push_hits(
+    prompt: &str,
+    session: &str,
+    kw_search: impl Fn(&str, usize) -> Vec<Scored<f64, EventId>>,
+    vec_search: impl Fn(&[f32; ese::DIMENSIONS]) -> Vec<Scored<f32, EventId>>,
+    text_of: impl Fn(&EventId) -> Option<TextRow>,
+    seen: &std::collections::HashSet<EventId>,
+    max: usize,
+) -> Vec<(EventId, TextRow)> {
+    let query = crate::event::cap(prompt, 600);
+    let kw = kw_search(&query, 12);
+    let vec = vec_search(&ese::encode_single(&query));
+    let both = |id: &EventId| kw.iter().any(|h| &h.val == id) && vec.iter().any(|h| &h.val == id);
+    let mut texts: std::collections::HashSet<String> = Default::default();
+    let mut out = Vec::new();
+    for (id, _) in rrf(&kw, &vec) {
+        if out.len() >= max {
+            break;
+        }
+        if !both(&id) || id.0 == session || seen.contains(&id) {
+            continue;
+        }
+        let Some(t) = text_of(&id) else { continue };
+        if PUSH_KINDS.contains(&t.kind.as_str()) && texts.insert(t.text.clone()) {
+            out.push((id, t));
+        }
+    }
+    out
+}
+
+/// The lines `peat hook` injects for [`push_hits`]: disposition first,
+/// the read-the-whole-thing handle last.
+pub fn push_text(hits: &[(EventId, TextRow)], now: u64) -> String {
+    let mut s = String::from(
+        "peat: from this project's memory, possibly relevant to this prompt \
+(judge each; kind and age shown):",
+    );
+    for (id, t) in hits {
+        s.push_str(&format!(
+            "\n  [{} · {}] {}  ▸ peat {} {}",
+            t.kind,
+            age_label(now, t.ts_ms),
+            ui::clip(&t.text, 320),
+            short_sess(&id.0),
+            id.1
+        ));
+    }
+    s
+}
+
 #[derive(serde::Serialize)]
 pub struct Brief {
     pub today: String,
+    /// standing instructions from the user: hold until superseded
+    rulings: Vec<serde_json::Value>,
+    rulings_more: usize,
+    /// unfinished things: hold until closed
+    loops: Vec<serde_json::Value>,
+    loops_more: usize,
     active: Vec<serde_json::Value>,
     days: Vec<serde_json::Value>,
     /// the temporal ladder: the rest of the past, geometrically coarser,
@@ -92,9 +168,46 @@ pub fn assemble<R: Readable>(
     subjects: &TableReader<'_, R, String, SubjStats>,
     evidence: &MultimapReader<'_, R, String, ObsRow>,
     sessions: &TableReader<'_, R, String, SessStats>,
+    distilled: &TableReader<'_, R, String, DistStats>,
     desk: &std::path::Path,
 ) -> Brief {
     let today_bucket = now / DAY_MS;
+
+    // ---- the distilled lane, read once: digests by window key, and the
+    // two registers that do not fade
+    let dist: Vec<DistRow> = distilled.iter().filter_map(|(_, s)| s.row).collect();
+    // window digests only: the bands and days look these up by handle
+    let windows: HashMap<&str, &str> = dist
+        .iter()
+        .filter(|r| r.lane == Lane::Digest && !r.key.contains('#'))
+        .map(|r| (r.key.as_str(), r.text.as_str()))
+        .collect();
+    let digest_of = |key: &str| windows.get(key).map(|t| (*t).to_string());
+    let rulings = standing(&dist, Lane::Ruling);
+    let rulings_out: Vec<serde_json::Value> = rulings
+        .iter()
+        .take(RULINGS_SHOWN)
+        .map(|r| {
+            serde_json::json!({
+                "subject": r.key, "text": r.text, "age": age_label(now, r.ts_ms),
+                // the citation is the expansion path: the user's own message
+                "handle": r.cites.first().map(|(s, q)| format!("▸ peat {} {q}", short_sess(s))),
+            })
+        })
+        .collect();
+    let loops = standing(&dist, Lane::Loop);
+    let fresh = |r: &&&DistRow| now.saturating_sub(r.ts_ms) <= LOOP_FRESH_MS;
+    let loops_out: Vec<serde_json::Value> = loops
+        .iter()
+        .filter(fresh)
+        .take(LOOPS_SHOWN)
+        .map(|r| {
+            serde_json::json!({
+                "key": r.key, "text": r.text, "age": age_label(now, r.ts_ms),
+                "handle": format!("▸ peat {}", short_sess(&r.session)),
+            })
+        })
+        .collect();
 
     // ---- day digest: the 3 most recent non-empty days
     let mut day_rows: Vec<(u64, DayStats)> = days.iter().collect();
@@ -116,14 +229,20 @@ pub fn assemble<R: Readable>(
         0 => today_bucket,
         n => day_rows[n.min(3) - 1].0,
     };
-    let further = ladder::bands(&all_days, &obs_per_day, frontier, budget);
+    let mut further = ladder::bands(&all_days, &obs_per_day, frontier, budget);
+    for b in &mut further {
+        b.digest = b.handle.strip_prefix("peat ").and_then(digest_of);
+    }
     let days_out: Vec<serde_json::Value> = day_rows
         .iter()
         .take(3)
         .map(|(day, s)| {
             let mut fs: Vec<(&String, &i64)> = s.files.iter().collect();
             fs.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+            let key = crate::distill::day_key(*day);
             serde_json::json!({
+                "digest": digest_of(&key),
+                "handle": format!("▸ peat {key}"),
                 "day": day_label(*day, today_bucket),
                 "tools": s.tools, "fails": s.fails,
                 "commits": s.commits, "sessions": s.sessions,
@@ -242,6 +361,10 @@ pub fn assemble<R: Readable>(
         // the caller's local calendar date, computed from the same civil-
         // days math as the rest of the tool (no subprocess)
         today: date_label((now as i64 + local_offset_ms()) as u64),
+        rulings_more: rulings.len().saturating_sub(rulings_out.len()),
+        rulings: rulings_out,
+        loops_more: loops.len().saturating_sub(loops_out.len()),
+        loops: loops_out,
         active,
         days: days_out,
         further,

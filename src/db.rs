@@ -90,6 +90,10 @@ fn normalize(p: &std::path::Path) -> PathBuf {
 /// harness deadline (`peat hook`). Wins over `PEAT_LOCK_WAIT_SECS`.
 pub static LOCK_WAIT_SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
+/// Set by hook paths that must never fail a session: on a lock timeout
+/// this is printed to stdout (it may be empty) and the process exits 0.
+pub static LOCK_FAIL_FALLBACK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// `.peat/` beside the nearest git/jj root above cwd, else cwd. Cached —
 /// callers hit this several times per invocation and the answer is fixed.
 pub fn peat_dir() -> PathBuf {
@@ -159,7 +163,7 @@ impl Drop for QuietPanics {
 /// `make` re-creates the pipeline per attempt (the value is consumed by a
 /// failed open); generic over `P` so the pipeline type stays inferred at
 /// the call site and reader destructuring keeps compiling.
-pub fn open<P>(path: PathBuf, make: impl Fn() -> P) -> KeyedStream<EventId, Envelope, P>
+pub fn open<P>(path: PathBuf, make: impl Fn() -> P) -> Ledger<P>
 where
     P: Push<Keyed<EventId, Envelope>>,
 {
@@ -210,6 +214,12 @@ where
                 }
                 if waited >= wait_max_ms {
                     drop(quiet);
+                    if let Some(fallback) = LOCK_FAIL_FALLBACK.get() {
+                        if !fallback.is_empty() {
+                            println!("{fallback}");
+                        }
+                        std::process::exit(0);
+                    }
                     ui::error(&format!(
                         "ledger still locked after {}s — another peat \
 process holds it (reads are exclusive too; a bulk capture can hold it for \
@@ -218,7 +228,7 @@ minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
                     ));
                     std::process::exit(75); // EX_TEMPFAIL
                 }
-                if waited == 0 && !ui::fancy_err() {
+                if waited == 0 && !ui::fancy_err() && LOCK_FAIL_FALLBACK.get().is_none() {
                     // non-tty gets one plain line instead of a spinner
                     eprintln!("peat: ledger busy (another peat process); waiting…");
                 }
@@ -234,7 +244,109 @@ minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
         }
     };
     phase.done();
-    st
+    Ledger(Some(st))
+}
+
+/// How long closing the ledger may take before peat stops waiting for it.
+/// A clean close finishes the compaction a worker is running, which takes
+/// seconds on a large ledger; anything past this is the hang below.
+const CLOSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The open ledger. Derefs to the store; its only addition is a bounded
+/// close.
+///
+/// fjall 3.1.9's `DatabaseInner::drop` can hang forever: it checks that a
+/// worker is alive, then makes a blocking send of `Close` on the bounded
+/// worker channel; when the channel is full and the last worker exits
+/// between the check and the send, nothing will ever receive. The process
+/// then holds `.peat/db/lock` indefinitely and every seat sharing the
+/// ledger waits behind it (seen: a detached capture parked 22 h on
+/// murail's ledger). Every commit is durable once `wtx` returns, so a close
+/// that overruns `CLOSE_DEADLINE` loses nothing by exiting: the watchdog
+/// says so on stderr and exits 0, and the OS releases the lock.
+pub struct Ledger<P: Push<Keyed<EventId, Envelope>>>(Option<KeyedStream<EventId, Envelope, P>>);
+
+impl<P: Push<Keyed<EventId, Envelope>>> std::ops::Deref for Ledger<P> {
+    type Target = KeyedStream<EventId, Envelope, P>;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("ledger is open until dropped")
+    }
+}
+
+impl<P: Push<Keyed<EventId, Envelope>>> std::ops::DerefMut for Ledger<P> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("ledger is open until dropped")
+    }
+}
+
+impl<P: Push<Keyed<EventId, Envelope>>> Drop for Ledger<P> {
+    fn drop(&mut self) {
+        let Some(store) = self.0.take() else { return };
+        close_within(
+            CLOSE_DEADLINE,
+            move || drop(store),
+            || {
+                eprintln!(
+                    "peat: closing the ledger hung for {}s (fjall shutdown race); \
+exiting so the lock is released — every commit is already durable",
+                    CLOSE_DEADLINE.as_secs()
+                );
+                std::process::exit(0);
+            },
+        );
+    }
+}
+
+/// Run `close`; if it has not returned within `deadline`, run `on_overrun`
+/// from a watchdog thread (which, in the ledger's case, ends the process
+/// — the only way out of a close parked forever on the main thread). A
+/// close that returns in time disarms the watchdog, so a later reopen in
+/// the same process is never hit by a stale one.
+fn close_within(
+    deadline: std::time::Duration,
+    close: impl FnOnce(),
+    on_overrun: impl FnOnce() + Send + 'static,
+) {
+    let (closed, wait) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        // a disconnect means the close returned (its sender dropped)
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = wait.recv_timeout(deadline) {
+            on_overrun();
+        }
+    });
+    close();
+    drop(closed);
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::close_within;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use std::time::Duration;
+
+    fn overran(close_takes: Duration) -> bool {
+        let fired = Arc::new(AtomicBool::new(false));
+        let f = fired.clone();
+        close_within(
+            Duration::from_millis(100),
+            || std::thread::sleep(close_takes),
+            move || f.store(true, SeqCst),
+        );
+        // give a disarmed watchdog the chance to misfire
+        std::thread::sleep(Duration::from_millis(300));
+        fired.load(SeqCst)
+    }
+
+    #[test]
+    fn a_close_that_hangs_trips_the_watchdog() {
+        assert!(overran(Duration::from_millis(400)));
+    }
+
+    #[test]
+    fn a_prompt_close_disarms_the_watchdog() {
+        assert!(!overran(Duration::ZERO));
+    }
 }
 
 #[cfg(test)]

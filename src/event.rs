@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped when the schema changes shape. Written into every envelope.
-pub const EVENT_VERSION: u16 = 3;
+pub const EVENT_VERSION: u16 = 4;
 
 pub type SessionId = String;
 
@@ -25,6 +25,15 @@ pub const OBS_SEQ_BASE: u32 = 1 << 31;
 /// Reserved seq for a `FinalMsg` delivered by the Stop hook's
 /// `last_assistant_message` (authoritative over transcript tail parsing).
 pub const HOOK_FINAL_SEQ: u32 = OBS_SEQ_BASE - 1;
+
+/// Distilled events (`Event::Distill`) take seqs from here up — above
+/// every observation a session could plausibly accrue, so the three
+/// ranges (transcript, obs, distilled) never collide.
+pub const DISTILL_SEQ_BASE: u32 = 3 << 30;
+
+/// The synthetic session that owns window digests (day, week, month …):
+/// they summarize many sessions, so no real one can hold them.
+pub const DISTILL_SESSION: &str = "peat-distill";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -114,6 +123,52 @@ pub enum Event {
         /// `None` when the deposit ran outside any git repo.
         basis: Option<Basis>,
     },
+
+    // ---- the distiller's lane ----
+    /// Something a model wrote *about* the ledger, deposited by `peat
+    /// distill` rather than by the working agent: a summary of a stretch
+    /// of history, a standing instruction the user gave, or an open loop.
+    /// It is an assertion like any other — an event, never view state —
+    /// so it is replayable, citable, and replaced only by a newer event
+    /// under the same `(lane, key)`. Added in v4; additive.
+    Distill {
+        lane: Lane,
+        /// What this is about: a segment (`<session>#<n>`) or calendar
+        /// window (`2026-10-04`, `2026-w40`, `2026-10`, `2026-q4`, `2026`)
+        /// for a digest; a kebab-case name for a ruling or a loop.
+        key: String,
+        text: String,
+        /// Rulings: still in force. Loops: still open. Digests: always true.
+        open: bool,
+        /// The ledger events this rests on. A ruling always cites the
+        /// user message it restates; a deposit that cannot is dropped.
+        cites: Vec<EventId>,
+        /// Fingerprint of the source text it was computed from — staleness
+        /// is "the source hashes differently now", never a clock.
+        src: u64,
+        /// Who wrote it (the distiller command), shown as provenance.
+        by: String,
+    },
+}
+
+/// The three lifetimes distilled memory has. Digests fade (the ladder
+/// shows them coarser with age); rulings hold until superseded; loops
+/// hold until closed. Append-only: postcard encodes the variant index.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Lane {
+    Digest,
+    Ruling,
+    Loop,
+}
+
+impl Lane {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Lane::Digest => "digest",
+            Lane::Ruling => "ruling",
+            Lane::Loop => "loop",
+        }
+    }
 }
 
 /// Repo state at deposit time, stamped mechanically into [`Event::Obs2`].
@@ -167,6 +222,7 @@ impl Event {
             Event::Said { .. } => "said",
             Event::CompactSummary { .. } => "compact",
             Event::Obs { .. } | Event::Obs2 { .. } => "obs",
+            Event::Distill { lane, .. } => lane.tag(),
         }
     }
 
@@ -227,6 +283,23 @@ impl Event {
                     .as_ref()
                     .map(|b| format!(" {}", b.label()))
                     .unwrap_or_default()
+            ),
+            Event::Distill {
+                key,
+                text,
+                open,
+                cites,
+                ..
+            } => format!(
+                "{}: {}{}{}",
+                key,
+                one(text),
+                if *open { "" } else { " [closed]" },
+                if cites.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [cites {} events]", cites.len())
+                }
             ),
         }
     }

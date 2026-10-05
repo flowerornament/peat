@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use fold::stream::KeyedStream;
 
-use crate::event::{Envelope, Event, EventId, OBS_SEQ_BASE};
+use crate::event::{DISTILL_SEQ_BASE, Envelope, Event, EventId, Lane, OBS_SEQ_BASE};
 use crate::pipeline::{DAY_MS, DayStats, SubjStats};
 
 fn tmp() -> std::path::PathBuf {
@@ -68,7 +68,7 @@ fn tool(session: &str, n: u32, ts: u64, ok: bool) -> (EventId, Envelope) {
 /// Keyword hits for `probe` (exact posting semantics — text-level).
 macro_rules! find_kw {
     ($st:expr, $probe:expr) => {
-        $st.rtx(|(_, _, (kw, _, _), _, _, _)| {
+        $st.rtx(|(_, _, (kw, _, _), _, _, _, _)| {
             kw.search($probe, 10)
                 .into_iter()
                 .map(|h| h.val)
@@ -83,7 +83,7 @@ macro_rules! find_kw {
 /// the old text — the revised doc must lose to the control.
 macro_rules! nearest {
     ($st:expr, $probe:expr) => {
-        $st.rtx(|(_, _, (_, vec, _), _, _, _)| {
+        $st.rtx(|(_, _, (_, vec, _), _, _, _, _)| {
             vec.search(&ese::encode_single($probe))
                 .first()
                 .map(|h| h.val.clone())
@@ -240,7 +240,7 @@ fn replay_prefix_matches_independent_prediction() {
         });
         let (want_days, want_subj) = predict(prefix);
 
-        let (got_days, got_subj) = st.rtx(|(days, _, _, (subjects, _), _, _)| {
+        let (got_days, got_subj) = st.rtx(|(days, _, _, (subjects, _), _, _, _)| {
             let d: BTreeMap<u64, (i64, i64)> = days
                 .iter()
                 .map(|(k, v): (u64, DayStats)| (k, (v.tools, v.fails)))
@@ -276,7 +276,7 @@ fn batching_is_unobservable() {
         });
     }
 
-    let a = one.rtx(|(days, _, _, (subjects, _), _, _)| {
+    let a = one.rtx(|(days, _, _, (subjects, _), _, _, _)| {
         (
             days.iter().collect::<BTreeMap<u64, DayStats>>().len(),
             subjects
@@ -285,7 +285,7 @@ fn batching_is_unobservable() {
                 .collect::<BTreeMap<_, _>>(),
         )
     });
-    let b = many.rtx(|(days, _, _, (subjects, _), _, _)| {
+    let b = many.rtx(|(days, _, _, (subjects, _), _, _, _)| {
         (
             days.iter().collect::<BTreeMap<u64, DayStats>>().len(),
             subjects
@@ -314,7 +314,7 @@ fn equal_timestamp_obs_resolve_by_seq() {
                 &obs("s1", 1, 5000, "staging", "second claim").1,
             );
         });
-        let text = st.rtx(|(_, _, _, (subjects, _), _, _)| {
+        let text = st.rtx(|(_, _, _, (subjects, _), _, _, _)| {
             subjects
                 .get(&"staging".to_string())
                 .map(|s: SubjStats| s.text)
@@ -342,7 +342,7 @@ fn prefix_fold_reconstructs_past_beliefs() {
     });
     // read the ledger mirror back, cut at day 2, fold into a scratch db
     let cutoff = 2 * DAY_MS;
-    let prefix: Vec<(EventId, Envelope)> = full.rtx(|(_, _, _, _, _, ledger)| {
+    let prefix: Vec<(EventId, Envelope)> = full.rtx(|(_, _, _, _, _, ledger, _)| {
         ledger
             .iter()
             .filter(|(_, e): &(EventId, Envelope)| e.ts_ms <= cutoff)
@@ -356,12 +356,12 @@ fn prefix_fold_reconstructs_past_beliefs() {
         }
     });
     let (then, now) = (
-        past.rtx(|(_, _, _, (subjects, _), _, _)| {
+        past.rtx(|(_, _, _, (subjects, _), _, _, _)| {
             subjects
                 .get(&"staging".to_string())
                 .map(|s: SubjStats| s.text)
         }),
-        full.rtx(|(_, _, _, (subjects, _), _, _)| {
+        full.rtx(|(_, _, _, (subjects, _), _, _, _)| {
             subjects
                 .get(&"staging".to_string())
                 .map(|s: SubjStats| s.text)
@@ -401,7 +401,7 @@ fn capture_fixture_parses_and_is_idempotent() {
             tx.upsert(id, e);
         }
     });
-    let once = st.rtx(|(days, _, _, _, sessions, _)| {
+    let once = st.rtx(|(days, _, _, _, sessions, _, _)| {
         (
             days.iter().collect::<BTreeMap<u64, DayStats>>().len(),
             sessions.iter().count(),
@@ -412,7 +412,7 @@ fn capture_fixture_parses_and_is_idempotent() {
             tx.upsert(id, e);
         }
     });
-    let twice = st.rtx(|(days, _, _, _, sessions, _)| {
+    let twice = st.rtx(|(days, _, _, _, sessions, _, _)| {
         (
             days.iter().collect::<BTreeMap<u64, DayStats>>().len(),
             sessions.iter().count(),
@@ -575,7 +575,7 @@ fn anchored_and_legacy_obs_coexist() {
             tx.upsert(&id, &e);
         }
     });
-    let (head, rows) = st.rtx(|(_, _, _, (subjects, evidence), _, _)| {
+    let (head, rows) = st.rtx(|(_, _, _, (subjects, evidence), _, _, _)| {
         (
             subjects.get(&"subj".to_string()) as Option<SubjStats>,
             evidence.get(&"subj".to_string()) as Vec<crate::pipeline::ObsRow>,
@@ -649,7 +649,7 @@ fn view_rebuild_replays_the_ledger() {
     assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "2");
     assert!(crate::beside(&dir, ".old").exists(), "previous db kept");
     let st = open!(&dir);
-    let (head, ledger_len) = st.rtx(|(_, _, _, (subjects, _), _, ledger)| {
+    let (head, ledger_len) = st.rtx(|(_, _, _, (subjects, _), _, ledger, _)| {
         (
             subjects.get(&"subj".to_string()) as Option<SubjStats>,
             ledger.iter().count(),
@@ -726,7 +726,7 @@ fn vector_lane_is_deterministic_across_opens() {
             }
         });
         st.checkpoint();
-        st.rtx(|(_, _, (_, vec, _), _, _, _)| {
+        st.rtx(|(_, _, (_, vec, _), _, _, _, _)| {
             vec.search(&ese::encode_single("hooks that fail silently"))
                 .into_iter()
                 .map(|h| h.val)
@@ -735,7 +735,7 @@ fn vector_lane_is_deterministic_across_opens() {
     };
     let second = {
         let st = open!(&dir);
-        st.rtx(|(_, _, (_, vec, _), _, _, _)| {
+        st.rtx(|(_, _, (_, vec, _), _, _, _, _)| {
             vec.search(&ese::encode_single("hooks that fail silently"))
                 .into_iter()
                 .map(|h| h.val)
@@ -781,4 +781,277 @@ fn last_session_prefers_this_desk_on_a_shared_ledger() {
         crate::brief::last_session(&[], std::path::Path::new("/x")).map(|_| ()),
         None
     );
+}
+
+// ---------------------------------------------------------------- distilled
+
+fn distilled(
+    session: &str,
+    n: u32,
+    ts: u64,
+    lane: Lane,
+    key: &str,
+    text: &str,
+    open: bool,
+) -> (EventId, Envelope) {
+    (
+        (session.to_string(), DISTILL_SEQ_BASE + n),
+        Envelope::new(
+            session,
+            ts,
+            Event::Distill {
+                lane,
+                key: key.to_string(),
+                text: text.to_string(),
+                open,
+                cites: vec![(session.to_string(), 16)],
+                src: 7,
+                by: "test".into(),
+            },
+        ),
+    )
+}
+
+/// A revised ruling replaces the old one in the register, the trail keeps
+/// both, and the superseded text — still in the search index, because the
+/// ledger never forgets — is recognisably no longer the current word.
+#[test]
+fn a_newer_deposit_supersedes_and_the_trail_keeps_both() {
+    let mut st = open!(tmp());
+    let old = distilled(
+        "s1",
+        0,
+        1000,
+        Lane::Ruling,
+        "land",
+        "push by hand zebrafish",
+        true,
+    );
+    let new = distilled(
+        "s2",
+        0,
+        2000,
+        Lane::Ruling,
+        "land",
+        "always use just land",
+        true,
+    );
+    let lp = distilled("s2", 1, 2000, Lane::Loop, "land", "gate is red", true);
+    st.wtx(|tx| {
+        for (id, e) in [&new, &old, &lp] {
+            tx.upsert(id, e);
+        }
+    });
+    let key = crate::pipeline::dist_key(Lane::Ruling, "land");
+    let (head, trail, loop_row) = st.rtx(|(_, _, _, _, _, _, (dist, trail))| {
+        let head: crate::pipeline::DistStats = dist.get(&key).unwrap();
+        let trail: Vec<crate::pipeline::DistRow> = trail.get(&key);
+        let lp: Option<crate::pipeline::DistStats> =
+            dist.get(&crate::pipeline::dist_key(Lane::Loop, "land"));
+        (head, trail, lp)
+    });
+    let row = head.row.unwrap();
+    assert_eq!(
+        row.text, "always use just land",
+        "newest wins whatever the write order"
+    );
+    assert_eq!((head.count, trail.len()), (2, 2));
+    assert!(loop_row.is_some(), "a loop and a ruling may share a name");
+
+    // the old text is still findable; `live` is what tells a reader so
+    let hits = find_kw!(st, "zebrafish");
+    assert_eq!(hits, vec![old.0.clone()]);
+    macro_rules! is_live {
+        ($id:expr) => {
+            st.rtx(|(_, _, _, _, _, ledger, (dist, _))| {
+                crate::live($id, |i| ledger.get(i), |k| dist.get(k))
+            })
+        };
+    }
+    assert!(!is_live!(&old.0) && is_live!(&new.0));
+
+    // closing a loop takes it out of recall; the event itself stays
+    let closed = distilled("s3", 0, 3000, Lane::Loop, "land", "gate is red", false);
+    st.wtx(|tx| tx.upsert(&closed.0, &closed.1));
+    assert!(!is_live!(&lp.0));
+    assert!(find_kw!(st, "gate red").iter().all(|id| id != &closed.0));
+}
+
+/// The wake leads with what does not fade (rulings, loops) and says the
+/// past in words where a digest exists, counts where it does not.
+#[test]
+fn the_wake_leads_with_rulings_and_words_its_bands() {
+    let day = 20_000u64; // 2024-10-04
+    let ts = day * DAY_MS + 1000;
+    let mut st = open!(tmp());
+    let rows = [
+        tool("s1", 1, ts, true),
+        tool("s1", 2, ts - DAY_MS, true),
+        tool("s1", 3, ts - 2 * DAY_MS, true),
+        tool("s1", 4, ts - 40 * DAY_MS, true),
+        distilled(
+            "s1",
+            0,
+            ts,
+            Lane::Ruling,
+            "land",
+            "always use just land",
+            true,
+        ),
+        distilled("s1", 1, ts, Lane::Ruling, "old", "withdrawn", false),
+        distilled("s1", 2, ts, Lane::Loop, "clippy", "gate is red", true),
+        distilled(
+            "s1",
+            3,
+            ts - 40 * DAY_MS,
+            Lane::Loop,
+            "ancient",
+            "nobody came back",
+            true,
+        ),
+        distilled(
+            "d",
+            0,
+            ts,
+            Lane::Digest,
+            "2024-10-04",
+            "Fixed the gate.",
+            true,
+        ),
+        distilled(
+            "d",
+            1,
+            ts,
+            Lane::Digest,
+            "2024-08",
+            "Built the ladder.",
+            true,
+        ),
+    ];
+    st.wtx(|tx| {
+        for (id, e) in &rows {
+            tx.upsert(id, e);
+        }
+    });
+    let brief = make_brief!(st, "", ts + DAY_MS, 8);
+    let v = serde_json::to_value(&brief).unwrap();
+    assert_eq!(
+        v["rulings"].as_array().unwrap().len(),
+        1,
+        "withdrawn rulings do not stand"
+    );
+    assert_eq!(
+        v["rulings"][0]["handle"], "▸ peat s1 16",
+        "the citation is the way in"
+    );
+    assert_eq!(v["loops"][0]["key"], "clippy");
+    assert_eq!(
+        (v["loops"].as_array().unwrap().len(), &v["loops_more"]),
+        (1, &serde_json::json!(1)),
+        "a loop untouched for a month leaves the wake but is still counted"
+    );
+    assert_eq!(v["days"][0]["digest"], "Fixed the gate.");
+    let band = v["further"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["handle"] == "peat 2024-08");
+    assert_eq!(
+        band.unwrap_or_else(|| panic!("{}", v["further"]))["digest"],
+        "Built the ladder.",
+        "{}",
+        v["further"]
+    );
+    let text = crate::brief::render(&brief);
+    let (r, l, d) = (
+        text.find("standing rulings").unwrap(),
+        text.find("open loops").unwrap(),
+        text.find("recent activity").unwrap(),
+    );
+    assert!(
+        r < l && l < d,
+        "what holds comes before what happened:\n{text}"
+    );
+    assert!(text.contains("Fixed the gate.") && text.contains("Built the ladder."));
+}
+
+/// Push needs both lanes to agree, skips the asking session's own text,
+/// and never repeats a line.
+#[test]
+fn push_takes_agreement_from_other_sessions_once() {
+    let mut st = open!(tmp());
+    let hit = distilled(
+        "s1",
+        0,
+        1000,
+        Lane::Ruling,
+        "land",
+        "always land through just land never push by hand",
+        true,
+    );
+    let own = distilled(
+        "me",
+        0,
+        1000,
+        Lane::Loop,
+        "land2",
+        "land through just land is still failing",
+        true,
+    );
+    let far = distilled(
+        "s9",
+        0,
+        1000,
+        Lane::Ruling,
+        "zoo",
+        "okapi giraffe zebra habitats",
+        true,
+    );
+    st.wtx(|tx| {
+        tx.upsert(&hit.0, &hit.1);
+        tx.upsert(&own.0, &own.1);
+        tx.upsert(&far.0, &far.1);
+    });
+    let push = |seen: &std::collections::HashSet<EventId>| {
+        st.rtx(|(_, _, (kw, vec, texts), _, _, _, _)| {
+            crate::brief::push_hits(
+                "how should I land this change, push by hand?",
+                "me",
+                |q, n| kw.search(q, n),
+                |v| vec.search(v),
+                |id| texts.get(id),
+                seen,
+                3,
+            )
+        })
+    };
+    let got = push(&Default::default());
+    assert_eq!(
+        got.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        vec![hit.0.clone()]
+    );
+    let line = crate::brief::push_text(&got, 1000 + DAY_MS);
+    assert!(
+        line.contains("[ruling · 1d]") && line.ends_with(&format!("▸ peat s1 {}", hit.0.1)),
+        "{line}"
+    );
+    assert!(push(&[hit.0.clone()].into_iter().collect()).is_empty());
+
+    // a line only the vector lane finds (no word in common) is not pushed:
+    // with a small corpus the vector lane returns everything
+    let got = push(&[hit.0.clone()].into_iter().collect());
+    assert!(
+        got.iter().all(|(id, _)| id != &far.0),
+        "one lane is not agreement"
+    );
+    let vec_only = st.rtx(|(_, _, (kw, vec, _), _, _, _, _)| {
+        let q = "how should I land this change, push by hand?";
+        let in_kw = kw.search(q, 12).iter().any(|h| h.val == far.0);
+        let in_vec = vec
+            .search(&ese::encode_single(q))
+            .iter()
+            .any(|h| h.val == far.0);
+        (in_kw, in_vec)
+    });
+    assert_eq!(vec_only, (false, true), "the fixture really is one-lane");
 }

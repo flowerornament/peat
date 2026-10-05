@@ -134,6 +134,10 @@ pub struct Band {
     pub obs: i64,
     /// a file names the band only when it dominates it (≥25% of touches)
     pub files: Vec<String>,
+    /// The distilled paragraph for this window, when one exists — set by
+    /// the reader from the `distilled` table; the ladder itself stays a
+    /// pure regrouping of the day rows.
+    pub digest: Option<String>,
 }
 
 /// Digest one explicit window (zoom's header and children reuse this).
@@ -158,6 +162,7 @@ pub fn digest(
         sessions: 0,
         obs: 0,
         files: Vec::new(),
+        digest: None,
     };
     let mut files: BTreeMap<&str, i64> = BTreeMap::new();
     let mut total_touches = 0i64;
@@ -415,6 +420,30 @@ pub fn parse_window(s: &str, now_bucket: u64) -> Option<(u64, u64, String)> {
     None
 }
 
+/// The digest key a window argument names (`w33` → `2026-w33`), or `None`
+/// for a range, which no single digest covers. `start` is the window's
+/// first day, as [`parse_window`] resolved it.
+pub fn window_key(arg: &str, start: u64, end: u64) -> Option<String> {
+    let a = arg.to_ascii_lowercase();
+    if a.contains("..") {
+        return None;
+    }
+    let c = Civil::from_bucket(start);
+    let tail = a.rsplit('-').next().unwrap_or(&a);
+    Some(if tail.starts_with('w') {
+        let (wy, wn) = Civil::from_bucket(end).iso_week();
+        format!("{wy}-w{wn}")
+    } else if tail.starts_with('q') {
+        format!("{}-q{}", c.y, (c.m - 1) / 3 + 1)
+    } else {
+        match a.split('-').count() {
+            1 => format!("{:04}", c.y),
+            2 => format!("{:04}-{:02}", c.y, c.m),
+            _ => format!("{:04}-{:02}-{:02}", c.y, c.m, c.d),
+        }
+    })
+}
+
 /// Children of a window, one rung finer: year → months, quarter → months,
 /// month → weeks, week → days, day → (caller renders sessions).
 pub fn children(start: u64, end: u64) -> Vec<(u64, u64, String, String)> {
@@ -606,5 +635,32 @@ mod tests {
         let with_files: Vec<&Band> = bs.iter().filter(|b| !b.files.is_empty()).collect();
         assert_eq!(with_files.len(), 1);
         assert_eq!(with_files[0].files, vec!["…/a/dominant.rs".to_string()]);
+    }
+
+    #[test]
+    fn a_window_argument_names_its_digest() {
+        let now = Civil {
+            y: 2026,
+            m: 10,
+            d: 5,
+        }
+        .bucket();
+        let key = |arg: &str| {
+            let (s, e, _) = parse_window(arg, now).unwrap();
+            window_key(arg, s, e)
+        };
+        assert_eq!(key("2026-10-04").as_deref(), Some("2026-10-04"));
+        assert_eq!(key("2026-w40").as_deref(), Some("2026-w40"));
+        assert_eq!(key("w40").as_deref(), Some("2026-w40"));
+        assert_eq!(key("2026-10").as_deref(), Some("2026-10"));
+        assert_eq!(key("q3").as_deref(), Some("2026-q3"));
+        assert_eq!(key("2026").as_deref(), Some("2026"));
+        assert_eq!(
+            key("2026-08..2026-09"),
+            None,
+            "a range has no single digest"
+        );
+        // ISO week 1 of 2026 starts in 2025: the key is the week's year
+        assert_eq!(key("2026-w1").as_deref(), Some("2026-w1"));
     }
 }

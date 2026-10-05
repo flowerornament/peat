@@ -1,4 +1,24 @@
 {{ ("== peat brief · " ~ today ~ " ==") | h1 }}
+{%- if rulings %}
+
+{{ "standing rulings (the user's instructions, newest wins; each cites the message it restates):" | h1 }}
+{%- for r in rulings %}
+  {{ r.subject | accent }}{{ (" (" ~ r.age ~ "):") | dim }} {{ r.text | clip(240) }}{% if r.handle %}  {{ r.handle | dim }}{% endif %}
+{%- endfor %}
+{%- if rulings_more %}
+  {{ ("… " ~ rulings_more ~ " older  ▸ peat rulings") | dim }}
+{%- endif %}
+{%- endif %}
+{%- if loops or loops_more %}
+
+{{ "open loops (left unfinished, newest first):" | h1 }}
+{%- for l in loops %}
+  {{ l.key | accent }}{{ (" (" ~ l.age ~ "):") | dim }} {{ l.text | clip(200) }}  {{ l.handle | dim }}
+{%- endfor %}
+{%- if loops_more %}
+  {{ ("… " ~ loops_more ~ " more, older or untouched for 30 days  ▸ peat loops") | dim }}
+{%- endif %}
+{%- endif %}
 {%- if active %}
 
 {{ "active in the last hour:" | h1 }}
@@ -10,14 +30,14 @@
 
 {{ "recent activity:" | h1 }}
 {%- for d in days %}
-  {{ d.day }}: {{ d.tools | k }} tools{% if d.fails %}{{ (" (" ~ d.fails ~ " fail)") | dim }}{% endif %}{% if d.commits %} · {{ d.commits }} commits{% endif %}{% if d.files %} · {{ d.files | join(", ") }}{% endif %}
+  {{ d.day }}: {% if d.digest %}{{ d.digest }} {{ "·" | dim }} {% endif %}{{ d.tools | k }} tools{% if d.fails %}{{ (" (" ~ d.fails ~ " fail)") | dim }}{% endif %}{% if d.commits %} · {{ d.commits }} commits{% endif %}{% if d.files and not d.digest %} · {{ d.files | join(", ") }}{% endif %}{% if d.digest %}  {{ d.handle | dim }}{% endif %}
 {%- endfor %}
 {%- endif %}
 {%- if further %}
 
 {{ "further back:" | h1 }}
 {%- for b in further %}
-  {{ ("[" ~ b.label ~ (" · " ~ b.span if b.span else "") ~ "]") | dim }} {{ b.tools | k }} tools{% if b.fails %}{{ (" (" ~ b.fails ~ " fail)") | dim }}{% endif %}{% if b.commits %} · {{ b.commits }} commits{% endif %}{% if b.sessions %} · {{ b.sessions }} sessions{% endif %}{% if b.obs %} · {{ b.obs }} obs{% endif %}{% if b.files %} · {{ b.files | join(", ") }}{% endif %}  {{ ("▸ " ~ b.handle) | dim }}
+  {{ ("[" ~ b.label ~ (" · " ~ b.span if b.span else "") ~ "]") | dim }} {% if b.digest %}{{ b.digest }} {{ "·" | dim }} {% endif %}{{ b.tools | k }} tools{% if b.fails %}{{ (" (" ~ b.fails ~ " fail)") | dim }}{% endif %}{% if b.commits %} · {{ b.commits }} commits{% endif %}{% if b.sessions %} · {{ b.sessions }} sessions{% endif %}{% if b.obs %} · {{ b.obs }} obs{% endif %}{% if b.files and not b.digest %} · {{ b.files | join(", ") }}{% endif %}  {{ ("▸ " ~ b.handle) | dim }}
 {%- endfor %}
 {%- endif %}
 {%- if last_session %}

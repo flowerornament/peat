@@ -13,7 +13,7 @@
 use fold::pipeline::Keyed;
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Basis, Envelope, Event, EventId};
+use crate::event::{Basis, Envelope, Event, EventId, Lane};
 
 pub const DAY_MS: u64 = 86_400_000;
 
@@ -89,6 +89,45 @@ pub struct TextRow {
     pub kind: String,
     pub ts_ms: u64,
     pub cited: bool,
+}
+
+/// One distilled deposit, as the views hold it. The newest per
+/// `"<lane>/<key>"` is the current one; the trail keeps them all.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DistRow {
+    pub lane: Lane,
+    pub key: String,
+    pub text: String,
+    pub open: bool,
+    pub cites: Vec<EventId>,
+    pub src: u64,
+    pub by: String,
+    pub session: String,
+    pub seq: u32,
+    pub ts_ms: u64,
+}
+
+/// Current state of one `(lane, key)`: newest deposit wins, ties by seq.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct DistStats {
+    pub row: Option<DistRow>,
+    pub count: i64,
+}
+
+/// The open rows of one lane, newest first: standing rulings, or open
+/// loops. One rule for every reader (the wake, the distiller's register).
+pub fn standing<'a>(rows: impl IntoIterator<Item = &'a DistRow>, lane: Lane) -> Vec<&'a DistRow> {
+    let mut out: Vec<&DistRow> = rows
+        .into_iter()
+        .filter(|r| r.lane == lane && r.open)
+        .collect();
+    out.sort_by_key(|r| std::cmp::Reverse((r.ts_ms, r.seq)));
+    out
+}
+
+/// The table key for a distilled row.
+pub fn dist_key(lane: Lane, key: &str) -> String {
+    format!("{}/{key}", lane.tag())
 }
 
 // ------------------------------------------------------------- branch fns
@@ -179,6 +218,14 @@ pub fn searchable(k: &Keyed<EventId, Envelope>) -> Option<Keyed<EventId, TextRow
         Event::Said { text } => (text, "said", true),
         Event::CompactSummary { text } => (text, "compact", true),
         Event::UserMsg { text } => (text, "user", true),
+        // a closed loop or retired ruling is history, not something to recall
+        Event::Distill {
+            lane,
+            text,
+            open: true,
+            cites,
+            ..
+        } => (text, lane.tag(), !cites.is_empty()),
         _ => return None,
     };
     if text.trim().is_empty() {
@@ -241,6 +288,50 @@ pub fn subj_step(acc: &mut SubjStats, v: &ObsRow, delta: isize) {
     }
 }
 
+pub fn dist_row(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, DistRow>> {
+    let Event::Distill {
+        lane,
+        key,
+        text,
+        open,
+        cites,
+        src,
+        by,
+    } = &k.val.kind
+    else {
+        return None;
+    };
+    Some(Keyed::new(
+        dist_key(*lane, key),
+        DistRow {
+            lane: *lane,
+            key: key.clone(),
+            text: text.clone(),
+            open: *open,
+            cites: cites.clone(),
+            src: *src,
+            by: by.clone(),
+            session: k.val.session.clone(),
+            seq: k.key.1,
+            ts_ms: k.val.ts_ms,
+        },
+    ))
+}
+
+/// Newest wins, ties broken by seq — the same declared asymmetry as
+/// [`subj_step`]: a bare remove of the winner would leave it standing,
+/// and peat's write paths only append or revise in place.
+pub fn dist_step(acc: &mut DistStats, v: &DistRow, delta: isize) {
+    acc.count += delta as i64;
+    let newer = acc
+        .row
+        .as_ref()
+        .is_none_or(|r| (v.ts_ms, v.seq) >= (r.ts_ms, r.seq));
+    if delta > 0 && newer {
+        acc.row = Some(v.clone());
+    }
+}
+
 pub fn sess_row(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, Envelope>> {
     match &k.val.kind {
         Event::SessionMeta { .. }
@@ -279,7 +370,8 @@ pub fn sess_step(acc: &mut SessStats, e: &Envelope, delta: isize) {
 /// needed (`KeyedStream::new(path, peat_pipeline!())`).
 ///
 /// Reader shape (mirrors the sink tree):
-/// `(days, files, (kw, vec, texts), (subjects, evidence), sessions, ledger)`
+/// `(days, files, (kw, vec, texts), (subjects, evidence), sessions, ledger,
+/// (distilled, dist_trail))`
 #[macro_export]
 macro_rules! peat_pipeline {
     () => {{
@@ -332,6 +424,15 @@ macro_rules! peat_pipeline {
             // iterable table — what makes `asof` replay possible without
             // re-parsing transcripts
             terminal::Table::new("ledger"),
+            // the distiller's lane: digests, rulings, loops — newest per
+            // (lane, key) in the table, every deposit in the trail
+            FilterMap::new(
+                p::dist_row,
+                (
+                    Aggregate::new("dist", p::dist_step, terminal::Table::new("distilled")),
+                    terminal::Multimap::new("dist_trail"),
+                ),
+            ),
         )
     }};
 }

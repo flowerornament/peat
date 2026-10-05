@@ -68,6 +68,8 @@ pub struct Input {
     pub last_assistant_message: Option<String>,
     pub tool_name: Option<String>,
     pub tool_command: Option<String>,
+    /// UserPromptSubmit: what the user just typed.
+    pub prompt: Option<String>,
 }
 
 impl Input {
@@ -81,6 +83,7 @@ impl Input {
             source: s("source"),
             last_assistant_message: s("last_assistant_message").filter(|x| !x.trim().is_empty()),
             tool_name: s("tool_name"),
+            prompt: s("prompt").filter(|x| !x.trim().is_empty()),
             tool_command: v
                 .get("tool_input")
                 .and_then(|t| t.get("command"))
@@ -100,6 +103,14 @@ pub enum Action {
     Brief { compacted: bool },
     /// Emit `additionalContext` (invisible to the user, weighed by the agent).
     Nudge(&'static str),
+    /// Search memory for this prompt and inject what both lanes agree on,
+    /// along with the first-prompt nudge when one is due. Needs the open
+    /// ledger, so it is handed back to `main` like the brief.
+    Push {
+        session: String,
+        prompt: String,
+        nudge: Option<&'static str>,
+    },
     /// Detach a capture of this transcript with this closing message.
     Capture {
         transcript: PathBuf,
@@ -211,6 +222,51 @@ pub fn enabled() -> bool {
     !(off(Some(&db::peat_dir())) || off(db.parent()))
 }
 
+/// Is prompt-time push switched on for this ledger? Opt-in, like the
+/// distiller: a file named `push` beside the database. It changes what
+/// every agent on the ledger sees, so an upgrade must not start it.
+fn push_enabled() -> bool {
+    db::db_path()
+        .parent()
+        .is_some_and(|d| d.join("push").exists())
+}
+
+/// A prompt worth searching memory for: the user's own words, with
+/// enough of them to mean something. Slash commands and harness
+/// wrappers are not questions.
+fn pushable(prompt: &str) -> bool {
+    let p = prompt.trim();
+    p.len() >= 24 && !p.starts_with('/') && !p.starts_with('<') && !p.starts_with("[hail ")
+}
+
+/// The session and prompt to push memory for, if this is a prompt worth
+/// it on a ledger that opted in. Pure, so the decision is testable.
+fn push_for(input: &Input, enabled: bool) -> Option<(&str, &str)> {
+    if input.event != "UserPromptSubmit" || !enabled {
+        return None;
+    }
+    let (sid, prompt) = (input.session_id.as_deref()?, input.prompt.as_deref()?);
+    pushable(prompt).then_some((sid, prompt))
+}
+
+/// Spawn `peat <args>` in its own process group with all stdio closed,
+/// so the hook returns in milliseconds and a harness deadline (or
+/// teardown) cannot cancel the work.
+fn detach(args: &[&std::ffi::OsStr]) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("peat"));
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let _ = cmd.spawn();
+}
+
 /// Run the hook: read stdin, decide, and perform everything except the
 /// brief, which needs the open ledger and is handed back to `main`.
 pub fn run(event_override: Option<String>) -> Action {
@@ -220,10 +276,31 @@ pub fn run(event_override: Option<String>) -> Action {
     if let Some(e) = event_override {
         input.event = e;
     }
-    if !enabled() {
+    // a distiller's model command may itself be a harness with hooks:
+    // its session must never be briefed, captured, or distilled in turn
+    if !enabled() || std::env::var_os(crate::distill::GUARD_ENV).is_some() {
         return Action::Nothing;
     }
     let action = plan(&input, |sid| nudge_marker(sid).exists());
+    let mark_nudged = |sid: &str| {
+        let m = nudge_marker(sid);
+        let _ = std::fs::create_dir_all(m.parent().unwrap());
+        let _ = std::fs::write(m, "");
+    };
+    if let Some((sid, prompt)) = push_for(&input, push_enabled()) {
+        let nudge = match action {
+            Action::Nudge(text) => {
+                mark_nudged(sid);
+                Some(text)
+            }
+            _ => None,
+        };
+        return Action::Push {
+            session: sid.to_string(),
+            prompt: prompt.to_string(),
+            nudge,
+        };
+    }
     match &action {
         Action::Brief { .. } => {
             if let Some(sid) = &input.session_id {
@@ -231,22 +308,28 @@ pub fn run(event_override: Option<String>) -> Action {
                 let _ = std::fs::create_dir_all(&dir);
                 let _ = std::fs::write(dir.join("current-session"), sid);
             }
+            // the sweep: distill whatever went quiet since the last
+            // session started. Detached, and a no-op unless this ledger
+            // opted in (`peat distill --sweep` checks the marker).
+            detach(
+                &["distill", "--sweep", "--since", "14", "--limit", "12"].map(std::ffi::OsStr::new),
+            );
         }
         Action::Nudge(text) => {
             if input.event == "UserPromptSubmit"
                 && let Some(sid) = &input.session_id
             {
-                let m = nudge_marker(sid);
-                let _ = std::fs::create_dir_all(m.parent().unwrap());
-                let _ = std::fs::write(m, "");
+                mark_nudged(sid);
             }
             println!("{}", nudge_json(&input.event, text));
         }
         Action::Capture {
             transcript,
             final_msg,
-        } => detach_capture(transcript, final_msg.as_deref()),
-        Action::Nothing => {}
+            // a turn ending is not a stretch ending; the two moments that
+            // close one (context replaced, session over) distill it
+        } => detach_capture(transcript, final_msg.as_deref(), input.event != "Stop"),
+        Action::Nothing | Action::Push { .. } => {}
     }
     action
 }
@@ -263,26 +346,17 @@ pub fn nudge_json(event: &str, text: &str) -> String {
     .to_string()
 }
 
-/// Spawn `peat capture` in its own process group with all stdio closed,
-/// so the hook returns in milliseconds and a harness deadline (or
-/// teardown) cannot cancel the work. Arguments travel as argv — the
-/// closing message is never re-quoted through a shell.
-fn detach_capture(transcript: &Path, final_msg: Option<&str>) {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("peat"));
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("capture").arg(transcript);
+/// Detach `peat capture`. Arguments travel as argv — the closing
+/// message is never re-quoted through a shell.
+fn detach_capture(transcript: &Path, final_msg: Option<&str>, distill: bool) {
+    let mut args: Vec<&std::ffi::OsStr> = vec!["capture".as_ref(), transcript.as_os_str()];
     if let Some(m) = final_msg {
-        cmd.arg("--final-msg").arg(m);
+        args.extend(["--final-msg".as_ref(), std::ffi::OsStr::new(m)]);
     }
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+    if distill {
+        args.push("--distill".as_ref());
     }
-    let _ = cmd.spawn();
+    detach(&args);
 }
 
 // ---- install ---------------------------------------------------------
@@ -502,6 +576,46 @@ mod tests {
         assert_eq!(i.tool_command.as_deref(), Some("git commit -m x"));
         assert_eq!(i.transcript_path, None, "empty path is absent");
         assert_eq!(Input::parse("not json"), Input::default());
+    }
+
+    #[test]
+    fn push_needs_the_opt_in_a_prompt_and_a_session() {
+        let raw = r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"why does the land gate fail on clippy?"}"#;
+        let i = Input::parse(raw);
+        assert_eq!(
+            push_for(&i, true),
+            Some(("s1", "why does the land gate fail on clippy?"))
+        );
+        assert_eq!(push_for(&i, false), None, "not opted in");
+        let no_sid = Input {
+            session_id: None,
+            ..Input::parse(raw)
+        };
+        assert_eq!(push_for(&no_sid, true), None);
+        let other = Input {
+            event: "Stop".into(),
+            ..Input::parse(raw)
+        };
+        assert_eq!(push_for(&other, true), None);
+        let short = Input {
+            prompt: Some("ok go".into()),
+            ..Input::parse(raw)
+        };
+        assert_eq!(push_for(&short, true), None);
+    }
+
+    #[test]
+    fn only_a_real_question_is_worth_searching_memory_for() {
+        let raw = r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"why does the land gate fail on clippy?"}"#;
+        assert!(pushable(Input::parse(raw).prompt.as_deref().unwrap()));
+        for p in [
+            "/model",
+            "ok do it",
+            "<command-name>/clear</command-name> and more words here",
+            "[hail ask from:a to:b] a relayed message from a peer",
+        ] {
+            assert!(!pushable(p), "{p}");
+        }
     }
 
     #[test]

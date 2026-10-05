@@ -18,10 +18,11 @@ peat asof 2026-07-10 <words>   # what was believed then; then diff against now
 peat --help                # the explicit spellings
 ```
 
-Read the brief before acting: `current understanding` is prior judgment on this codebase, and `last session` is where the previous agent stopped. Before non-trivial design work, search once (`peat <words>`), then open the trail of any subject that matches (`peat <subject>`).
+Read the brief before acting. `standing rulings` are the user's own instructions, each ending in the command that shows the message it restates: follow them as you would the user. `open loops` are things left unfinished; check whether yours is among them before starting something new. Dated lines that read as prose are distilled summaries of what happened then. `current understanding` is prior judgment on this codebase, and `last session` is where the previous agent stopped. Before non-trivial design work, search once (`peat <words>`), then open the trail of any subject that matches (`peat <subject>`).
 
 How far to trust a line:
 
+- **Who wrote it.** A ruling restates the user and cites the message; a digest or loop was written afterwards by a model reading the log, and can be wrong in detail. An observation is an agent's claim. When a summary matters to a decision, follow its handle down to the events.
 - **Cited vs uncited.** An obs with `--from` seqs is grounded; `uncited` is a bare assertion. Open the trail before building on one.
 - **Newest wins.** A subject's headline is its latest obs; the trail holds every earlier one. Disagreement inside a trail is information.
 - **Briefs clip; trails don't.** A `…` line is an index entry. Never quote a clipped line as the claim.
@@ -33,7 +34,7 @@ How far to trust a line:
 peat obs <subject> "<one-line claim>" --from <seq>[,<seq>]
 ```
 
-Deposit at commits and task completions; the hooks nudge you at both. One claim per obs; a subject accrues support through repetition, and a revised belief is a new obs on the same subject.
+Where a ledger is distilled, what happened is written for you afterwards, so say what you learned in your reply and let it be captured. Deposit by hand only the thing a summary would lose: a rule that will outlive this task. The hooks nudge at commits and task completions. One claim per obs; a subject accrues support through repetition, and a revised belief is a new obs on the same subject.
 
 The test for a claim: read months later by an agent on another desk with no shared context, would it change what they do?
 

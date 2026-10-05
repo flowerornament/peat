@@ -19,6 +19,7 @@
 
 pub mod brief;
 pub mod db;
+pub mod distill;
 pub mod event;
 mod hook;
 pub mod ladder;
@@ -30,8 +31,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use event::{Basis, Envelope, Event, EventId, OBS_SEQ_BASE};
-use pipeline::{DAY_MS, DayStats, ObsRow, SessStats, SubjStats};
+use event::{Basis, DISTILL_SEQ_BASE, Envelope, Event, EventId, Lane, OBS_SEQ_BASE};
+use pipeline::{DAY_MS, DayStats, DistRow, DistStats, ObsRow, SessStats, SubjStats, dist_key};
 use ui::{age_label, clip, short_sess};
 
 /// The day table pulled into memory for read-time joins (staleness of
@@ -117,6 +118,55 @@ enum Cmd {
         /// `.last_assistant_message`); overrides transcript tail parsing
         #[arg(long)]
         final_msg: Option<String>,
+        /// Then distill this session's stretch (hooks pass it when a
+        /// session ends or compacts; a no-op unless the ledger opted in)
+        #[arg(long, hide = true)]
+        distill: bool,
+    },
+    /// Write memory from the ledger: a cheap model reads what sessions
+    /// captured and deposits digests (a paragraph per stretch, day, week,
+    /// month), standing rulings (the user's instructions, each citing the
+    /// message it restates), and open loops. Hooks run it in the
+    /// background once a ledger opts in (`touch .peat/distill`).
+    /// Install this peat on every desk that shares the ledger first:
+    /// older binaries cannot read what it writes
+    Distill {
+        /// Distill this session (id prefix) now, even mid-flight
+        #[arg(long)]
+        session: Option<String>,
+        /// Only sessions active in the last N days
+        #[arg(long)]
+        since: Option<u64>,
+        /// Model calls this run may spend; the rest waits for the next
+        #[arg(long, default_value_t = 24)]
+        limit: usize,
+        /// Minutes a session must be quiet before its unfinished tail is
+        /// distilled (finished stretches never wait)
+        #[arg(long, default_value_t = 20)]
+        idle: u64,
+        /// Show what is stale; call no model
+        #[arg(long)]
+        dry_run: bool,
+        /// The form hooks run: silent, and only where the ledger opted in
+        #[arg(long, hide = true)]
+        sweep: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The user's standing instructions, newest first, each with the
+    /// message it restates (`--all` includes withdrawn and superseded)
+    Rulings {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What was left unfinished, newest first (`--all` includes closed)
+    Loops {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Deposit one judged claim about a subject (the only writing verb
     /// an agent runs by hand)
@@ -306,8 +356,16 @@ fn now_ms() -> u64 {
 macro_rules! make_brief {
     ($st:expr, $query:expr, $now:expr, $budget:expr) => {
         $st.rtx(
-            |(days, files, (kw, vec, texts), (subjects, evidence), sessions, _ledger)| {
-                brief::assemble(
+            |(
+                days,
+                files,
+                (kw, vec, texts),
+                (subjects, evidence),
+                sessions,
+                ledger,
+                (distilled, _),
+            )| {
+                $crate::brief::assemble(
                     $query,
                     $now,
                     $budget,
@@ -315,15 +373,253 @@ macro_rules! make_brief {
                     &files,
                     |q, n| kw.search(q, n),
                     |v| vec.search(v),
-                    |id| texts.get(id),
+                    |id| {
+                        texts
+                            .get(id)
+                            .filter(|_| $crate::live(id, |i| ledger.get(i), |k| distilled.get(k)))
+                    },
                     &subjects,
                     &evidence,
                     &sessions,
-                    db::peat_dir().parent().unwrap_or(std::path::Path::new("/")),
+                    &distilled,
+                    $crate::db::peat_dir()
+                        .parent()
+                        .unwrap_or(std::path::Path::new("/")),
                 )
             },
         )
     };
+}
+
+/// Is this indexed text still the current word? Every distilled deposit
+/// stays in the search indexes (the ledger never forgets), so a hit on a
+/// superseded digest, a revised ruling, or a rewritten loop must be
+/// dropped at read time: live means "the newest under its key is me".
+fn live(
+    id: &EventId,
+    event_of: impl Fn(&EventId) -> Option<Envelope>,
+    current: impl Fn(&String) -> Option<DistStats>,
+) -> bool {
+    match event_of(id).map(|e| e.kind) {
+        Some(Event::Distill { lane, key, .. }) => current(&dist_key(lane, &key))
+            .and_then(|s| s.row)
+            .is_some_and(|r| r.session == id.0 && r.seq == id.1),
+        _ => true,
+    }
+}
+
+/// `peat distill`: read a snapshot, release the ledger, let the model
+/// work, and take the lock again only to deposit — a model call takes
+/// seconds and every other peat on this ledger is waiting on that lock.
+#[allow(clippy::too_many_arguments)]
+fn run_distill(
+    session: Option<String>,
+    since: Option<u64>,
+    limit: usize,
+    idle: u64,
+    dry_run: bool,
+    sweep: bool,
+    json: bool,
+) {
+    let dbp = db::db_path();
+    if sweep && (distill::marker(&dbp).is_none() || !dbp.is_dir()) {
+        return;
+    }
+    let Some(lock) = distill::RunLock::take(&dbp) else {
+        if !sweep {
+            ui::note("another distill run holds this ledger; try again when it finishes");
+        }
+        return;
+    };
+    migrate_views(&dbp);
+    let now = now_ms();
+    let cmd = distill::command(&dbp);
+    let opts = distill::Opts {
+        now,
+        idle_ms: idle * 60_000,
+        cutoff_ms: since.map(|d| now.saturating_sub(d * DAY_MS)),
+        limit,
+        session,
+        by: distill::by_label(&cmd),
+        dry_run,
+    };
+    let settled = distill::load_settled(&dbp);
+    let snap = read_snapshot(&dbp, &settled, &opts);
+    let dist_rows = snap.dist.len();
+    let phase = (!sweep && !dry_run).then(|| ui::Phase::new("distilling"));
+    let model = |system: &str, user: &str| distill::call_model(&cmd, system, user);
+    let mut deposit = |deps: &[distill::Deposit]| {
+        lock.beat();
+        let mut st = db::open(dbp.clone(), || peat_pipeline!());
+        st.wtx(|tx| {
+            for d in deps {
+                let mut seq = DISTILL_SEQ_BASE;
+                while tx.contains(&(d.session.clone(), seq)) {
+                    seq += 1;
+                }
+                tx.upsert(
+                    &(d.session.clone(), seq),
+                    &Envelope::new(&d.session, d.ts_ms, d.event.clone()),
+                );
+            }
+        });
+    };
+    let rep = distill::run(snap, &opts, &model, &mut deposit);
+    if !dry_run {
+        distill::save_settled(&dbp, settled, &rep.settled);
+    }
+    if let Some(p) = phase {
+        p.done();
+    }
+    if sweep {
+        return;
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rep).unwrap());
+        return;
+    }
+    for f in &rep.failures {
+        ui::error(&format!("distill: {f}"));
+    }
+    if dry_run {
+        ui::note(&format!(
+            "{} stretches and windows are stale; `peat distill` writes them",
+            rep.pending
+        ));
+        return;
+    }
+    ui::note(&format!(
+        "distilled {} stretches, {} windows · {} rulings · {} loops opened, {} closed · {} model calls ({})",
+        rep.segments,
+        rep.windows,
+        rep.rulings,
+        rep.loops_opened,
+        rep.loops_closed,
+        rep.calls,
+        opts.by
+    ));
+    if rep.uncited_dropped > 0 {
+        ui::note(&format!(
+            "{} rulings discarded: no user message in their stretch carries their words",
+            rep.uncited_dropped
+        ));
+        for d in &rep.dropped {
+            eprintln!("    {}", ui::dim(&clip(d, 160)));
+        }
+    }
+    if rep.pending > 0 {
+        ui::note(&format!(
+            "{} more are stale — run `peat distill` again (or raise --limit)",
+            rep.pending
+        ));
+    }
+    if dist_rows > distill::DIST_ROWS_TRIP_WIRE {
+        ui::note(&format!(
+            "the distilled table holds {dist_rows} rows and every brief reads all of them — \
+time to split it into per-lane views (see distill::DIST_ROWS_TRIP_WIRE)"
+        ));
+    }
+}
+
+/// What a distill run reads before any model is called: the session and
+/// distilled tables, and the events of the candidate sessions — the one
+/// full scan of the ledger, paid only when some session has work.
+fn read_snapshot(
+    dbp: &std::path::Path,
+    settled: &std::collections::BTreeMap<String, u64>,
+    opts: &distill::Opts,
+) -> distill::Snapshot {
+    let st = db::open(dbp.to_path_buf(), || peat_pipeline!());
+    st.rtx(|(_, _, _, _, sessions, ledger, (distilled, _))| {
+        let sessions: std::collections::BTreeMap<String, SessStats> = sessions.iter().collect();
+        let dist: std::collections::BTreeMap<String, DistRow> = distilled
+            .iter()
+            .filter_map(|(k, s): (String, DistStats)| s.row.map(|r| (k, r)))
+            .collect();
+        let want = distill::candidates(&sessions, &dist, settled, opts);
+        let mut events: std::collections::BTreeMap<String, Vec<(u32, Envelope)>> =
+            Default::default();
+        if !want.is_empty() {
+            for ((sess, seq), e) in ledger
+                .iter()
+                .filter(|((sess, _), _): &(EventId, Envelope)| want.contains(sess))
+            {
+                events.entry(sess).or_default().push((seq, e));
+            }
+        }
+        distill::Snapshot {
+            sessions,
+            events,
+            dist,
+        }
+    })
+}
+
+/// `peat hook` on a prompt: search memory for it and inject what both
+/// lanes agree on. Bounded and silent — two seconds for the lock, no
+/// view rebuild, and on any miss the prompt goes through untouched.
+fn run_push(session: &str, prompt: &str, nudge: Option<&'static str>) {
+    let emit = |text: &str| println!("{}", hook::nudge_json("UserPromptSubmit", text));
+    let dbp = db::db_path();
+    let current = std::fs::read_to_string(beside(&dbp, ".view-version"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    if current != Some(VIEW_VERSION) {
+        if let Some(n) = nudge {
+            emit(n);
+        }
+        return;
+    }
+    let _ = db::LOCK_WAIT_SECS.set(2);
+    let _ = db::LOCK_FAIL_FALLBACK.set(
+        nudge
+            .map(|n| hook::nudge_json("UserPromptSubmit", n))
+            .unwrap_or_default(),
+    );
+    // each line is pushed once per session: repeating it buys nothing
+    let seen_path = db::peat_dir().join(format!("pushed-{session}"));
+    let seen: std::collections::HashSet<EventId> = std::fs::read_to_string(&seen_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (s, q) = l.rsplit_once(' ')?;
+            Some((s.to_string(), q.parse().ok()?))
+        })
+        .collect();
+    let st = db::open(dbp, || peat_pipeline!());
+    let hits = st.rtx(|(_, _, (kw, vec, texts), _, _, ledger, (distilled, _))| {
+        brief::push_hits(
+            prompt,
+            session,
+            |q, n| kw.search(q, n),
+            |v| vec.search(v),
+            |id| {
+                texts
+                    .get(id)
+                    .filter(|_| live(id, |i| ledger.get(i), |k| distilled.get(k)))
+            },
+            &seen,
+            3,
+        )
+    });
+    drop(st);
+    let mut parts: Vec<String> = nudge.map(str::to_string).into_iter().collect();
+    if !hits.is_empty() {
+        parts.push(brief::push_text(&hits, now_ms()));
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&seen_path)
+        {
+            for (id, _) in &hits {
+                let _ = writeln!(f, "{} {}", id.0, id.1);
+            }
+        }
+    }
+    if !parts.is_empty() {
+        emit(&parts.join("\n\n"));
+    }
 }
 
 /// The command that reads a subject's full trail: bare `peat <name>` when
@@ -457,7 +753,7 @@ fn migrate_views(dbdir: &std::path::Path) {
     // envelopes are additive-only, and nothing here reads a view row
     let events: Vec<(EventId, Envelope)> = {
         let st = db::open(dbdir.to_path_buf(), || peat_pipeline!());
-        st.rtx(|(_, _, _, _, _, ledger)| ledger.iter().collect())
+        st.rtx(|(_, _, _, _, _, ledger, _)| ledger.iter().collect())
     };
     let fresh_dir = beside(dbdir, ".rebuild");
     let _ = std::fs::remove_dir_all(&fresh_dir);
@@ -528,8 +824,28 @@ fn main() {
                     }),
                 }
             }
+            hook::Action::Push {
+                session,
+                prompt,
+                nudge,
+            } => {
+                run_push(&session, &prompt, nudge);
+                return;
+            }
             _ => return,
         },
+        Some(Cmd::Distill {
+            session,
+            since,
+            limit,
+            idle,
+            dry_run,
+            sweep,
+            json,
+        }) => {
+            run_distill(session, since, limit, idle, dry_run, sweep, json);
+            return;
+        }
         _ => cli,
     };
 
@@ -567,7 +883,7 @@ fn main() {
                     seq: q.get(1).and_then(|s| s.parse().ok()),
                 }
             } else if q.len() == 1
-                && st.rtx(|(_, _, _, (subjects, _), _, _)| subjects.get(&q[0]).is_some())
+                && st.rtx(|(_, _, _, (subjects, _), _, _, _)| subjects.get(&q[0]).is_some())
             {
                 // an exact subject name reads its full evidence trail —
                 // the expansion path every clipped belief line points at
@@ -594,11 +910,17 @@ fn main() {
         }
     };
 
+    let cmd_lane = if matches!(cmd, Cmd::Rulings { .. }) {
+        Lane::Ruling
+    } else {
+        Lane::Loop
+    };
     match cmd {
         Cmd::Capture {
             transcript,
             session,
             final_msg,
+            distill,
         } => {
             let Ok(jsonl) = std::fs::read_to_string(&transcript) else {
                 ui::error(&format!("cannot read {}", transcript.display()));
@@ -656,6 +978,12 @@ fn main() {
                 "captured {n} events from session {}",
                 parsed.session
             ));
+            if distill {
+                // the stretch just closed: write its memory now, with the
+                // ledger released (the model call must not hold the lock)
+                drop(st);
+                run_distill(Some(parsed.session), None, 6, 0, false, true, false);
+            }
         }
 
         Cmd::Obs {
@@ -728,7 +1056,7 @@ beside the shared db); pass --session",
             // one transaction: hint, seq scan, insert, and count all see
             // the same state (and the count sees our own write)
             let count = st.wtx(|tx| {
-                let near: Vec<String> = tx.rtx(|(_, _, _, (subjects, _), _, _)| {
+                let near: Vec<String> = tx.rtx(|(_, _, _, (subjects, _), _, _, _)| {
                     subjects
                         .iter()
                         .filter(|(s, _): &(String, SubjStats)| {
@@ -746,7 +1074,7 @@ beside the shared db); pass --session",
                     seq += 1;
                 }
                 tx.upsert(&(session.clone(), seq), &env);
-                tx.rtx(|(_, _, _, (subjects, _), _, _)| {
+                tx.rtx(|(_, _, _, (subjects, _), _, _, _)| {
                     subjects
                         .get(&subject)
                         .map(|s: SubjStats| s.count)
@@ -780,7 +1108,88 @@ consider splitting into separate observations",
             }
         }
 
-        Cmd::Hook { .. } | Cmd::Skill => unreachable!("handled before the ledger opens"),
+        Cmd::Hook { .. } | Cmd::Skill | Cmd::Distill { .. } => {
+            unreachable!("handled before the ledger opens")
+        }
+
+        Cmd::Rulings { all, json } | Cmd::Loops { all, json } => {
+            let lane = if matches!(cmd_lane, Lane::Ruling) {
+                Lane::Ruling
+            } else {
+                Lane::Loop
+            };
+            let now = now_ms();
+            // current rows by default; --all reads the whole trail, so a
+            // withdrawn ruling or a closed loop is still on the record
+            let mut rows: Vec<(DistRow, bool)> =
+                st.rtx(|(_, _, _, _, _, _, (distilled, trail))| {
+                    let cur: Vec<(String, DistStats)> = distilled.iter().collect();
+                    let mut out = Vec::new();
+                    for (k, s) in cur {
+                        let Some(head) = s.row.filter(|r| r.lane == lane) else {
+                            continue;
+                        };
+                        if all {
+                            for r in trail.get(&k) {
+                                let r: DistRow = r;
+                                let is_head = (r.session.as_str(), r.seq)
+                                    == (head.session.as_str(), head.seq);
+                                out.push((r, is_head));
+                            }
+                        } else if head.open {
+                            out.push((head, true));
+                        }
+                    }
+                    out
+                });
+            rows.sort_by_key(|(r, _)| std::cmp::Reverse((r.ts_ms, r.seq)));
+            if json {
+                let v: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|(r, head)| {
+                        serde_json::json!({
+                            "key": r.key, "text": r.text, "open": r.open, "current": head,
+                            "age": age_label(now, r.ts_ms), "by": r.by,
+                            "session": r.session, "seq": r.seq,
+                            "cites": r.cites.iter().map(|(s, q)| serde_json::json!({"session": s, "seq": q})).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+            } else if rows.is_empty() {
+                println!(
+                    "{}",
+                    ui::dim(&format!(
+                        "no {}s yet (`peat distill` writes them)",
+                        lane.tag()
+                    ))
+                );
+            } else {
+                for (r, head) in &rows {
+                    let state = match (r.open, head) {
+                        (true, true) => "",
+                        (true, false) => ", superseded",
+                        (false, _) if lane == Lane::Ruling => ", withdrawn",
+                        (false, _) => ", closed",
+                    };
+                    let handle = match r.cites.first() {
+                        Some((s, q)) => format!("▸ peat {} {q}", short_sess(s)),
+                        None => format!("▸ peat {}", short_sess(&r.session)),
+                    };
+                    println!(
+                        "  {} {} {}  {}",
+                        ui::accent(&r.key),
+                        ui::dim(&format!(
+                            "({}{state}, by {}):",
+                            age_label(now, r.ts_ms),
+                            r.by
+                        )),
+                        r.text,
+                        ui::dim(&handle)
+                    );
+                }
+            }
+        }
 
         Cmd::Recall {
             query,
@@ -793,13 +1202,14 @@ consider splitting into separate observations",
             if let Some(subj) = subject {
                 // the claims register read: current text plus the full
                 // evidence trail, straight from the evidence multimap
-                let (head, mut rows, days) = st.rtx(|(days, _, _, (subjects, evidence), _, _)| {
-                    (
-                        subjects.get(&subj) as Option<SubjStats>,
-                        evidence.get(&subj) as Vec<ObsRow>,
-                        days.iter().collect::<DayCommits>(),
-                    )
-                });
+                let (head, mut rows, days) =
+                    st.rtx(|(days, _, _, (subjects, evidence), _, _, _)| {
+                        (
+                            subjects.get(&subj) as Option<SubjStats>,
+                            evidence.get(&subj) as Vec<ObsRow>,
+                            days.iter().collect::<DayCommits>(),
+                        )
+                    });
                 rows.sort_by_key(|r| std::cmp::Reverse(r.ts_ms));
                 print_subject(&subj, head, &rows, &days, now, json);
                 return;
@@ -824,47 +1234,54 @@ consider splitting into separate observations",
                 basis: Option<String>,
                 text: String,
             }
-            let (hits, lane) = st.rtx(|(days, _, (kw, vec, texts), _, _, ledger)| {
-                let day_commits: DayCommits = days.iter().collect();
-                // the vector lane is an exact scan; this count is the
-                // trip-wire for building the store-resident graph (spec
-                // 2026-09-02). It appears where the cost is felt, nowhere else.
-                let lane = vec.len();
-                let hits: Vec<Hit> = brief::rrf(
-                    &kw.search(&query, limit * 2),
-                    &vec.search(&ese::encode_single(&query)),
-                )
-                .into_iter()
-                .filter_map(|(id, score)| {
-                    let t = texts.get(&id)?;
-                    if !filter.matches(now, &id.0, &t.kind, t.ts_ms) {
-                        return None;
-                    }
-                    // the anchor lives on the envelope, not the text row:
-                    // a point-read per obs hit, bounded by `limit`
-                    let basis = (t.kind == "obs")
-                        .then(|| ledger.get(&id))
-                        .flatten()
-                        .and_then(|e: Envelope| match e.kind {
-                            Event::Obs2 { basis, .. } => basis,
-                            _ => None,
+            let (hits, lane) = st.rtx(
+                |(days, _, (kw, vec, texts), _, _, ledger, (distilled, _))| {
+                    // a one-child window repeats its child's paragraph verbatim
+                    let mut said: std::collections::HashSet<String> = Default::default();
+                    let day_commits: DayCommits = days.iter().collect();
+                    // the vector lane is an exact scan; this count is the
+                    // trip-wire for building the store-resident graph (spec
+                    // 2026-09-02). It appears where the cost is felt, nowhere else.
+                    let lane = vec.len();
+                    let hits: Vec<Hit> = brief::rrf(
+                        &kw.search(&query, limit * 2),
+                        &vec.search(&ese::encode_single(&query)),
+                    )
+                    .into_iter()
+                    .filter_map(|(id, score)| {
+                        let t = texts.get(&id)?;
+                        if !filter.matches(now, &id.0, &t.kind, t.ts_ms)
+                            || !live(&id, |i| ledger.get(i), |k| distilled.get(k))
+                            || !said.insert(t.text.clone())
+                        {
+                            return None;
+                        }
+                        // the anchor lives on the envelope, not the text row:
+                        // a point-read per obs hit, bounded by `limit`
+                        let basis = (t.kind == "obs")
+                            .then(|| ledger.get(&id))
+                            .flatten()
+                            .and_then(|e: Envelope| match e.kind {
+                                Event::Obs2 { basis, .. } => basis,
+                                _ => None,
+                            })
+                            .map(|b| b.label_with(pipeline::commits_since(&day_commits, t.ts_ms)));
+                        Some(Hit {
+                            score: (score * 1000.0).round() / 1000.0,
+                            kind: t.kind,
+                            cited: t.cited,
+                            age: age_label(now, t.ts_ms),
+                            session: short_sess(&id.0),
+                            seq: id.1,
+                            basis,
+                            text: t.text,
                         })
-                        .map(|b| b.label_with(pipeline::commits_since(&day_commits, t.ts_ms)));
-                    Some(Hit {
-                        score: (score * 1000.0).round() / 1000.0,
-                        kind: t.kind,
-                        cited: t.cited,
-                        age: age_label(now, t.ts_ms),
-                        session: short_sess(&id.0),
-                        seq: id.1,
-                        basis,
-                        text: t.text,
                     })
-                })
-                .take(limit)
-                .collect();
-                (hits, lane)
-            });
+                    .take(limit)
+                    .collect();
+                    (hits, lane)
+                },
+            );
             if lane > FLAT_LANE_TRIP_WIRE {
                 ui::note(&format!(
                     "vector lane holds {lane} rows — past the exact scan's design point; \
@@ -903,7 +1320,7 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
 
         Cmd::Events { filter, json } => {
             let now = now_ms();
-            let mut rows: Vec<(EventId, Envelope)> = st.rtx(|(_, _, _, _, _, ledger)| {
+            let mut rows: Vec<(EventId, Envelope)> = st.rtx(|(_, _, _, _, _, ledger, _)| {
                 ledger
                     .iter()
                     .filter(|((sess, _), e): &(EventId, Envelope)| {
@@ -946,7 +1363,7 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
         Cmd::Subjects { json } => {
             let now = now_ms();
             let (mut subj, days): (Vec<(String, SubjStats)>, DayCommits) =
-                st.rtx(|(days, _, _, (subjects, _), _, _)| {
+                st.rtx(|(days, _, _, (subjects, _), _, _, _)| {
                     (subjects.iter().collect(), days.iter().collect())
                 });
             subj.sort_by_key(|(_, s)| std::cmp::Reverse(s.last_ms));
@@ -997,7 +1414,7 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
             let Some(seq) = seq else {
                 // no seq: one session's overview — summary row, its
                 // observations, and the handle to its raw events
-                let found = st.rtx(|(_, _, _, (subjects, evidence), sessions, _ledger)| {
+                let found = st.rtx(|(_, _, _, (subjects, evidence), sessions, _ledger, _)| {
                     let hit: Option<(String, SessStats)> = sessions
                         .iter()
                         .find(|(sess, _): &(String, SessStats)| sess.starts_with(session.as_str()));
@@ -1069,7 +1486,7 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
                 );
                 return;
             };
-            let (hit, citing) = st.rtx(|(_, _, _, (subjects, evidence), sessions, ledger)| {
+            let (hit, citing) = st.rtx(|(_, _, _, (subjects, evidence), sessions, ledger, _)| {
                 // resolve the session prefix against the small sessions
                 // table, then point-read the ledger — never scan it
                 let hit: Option<(EventId, Envelope)> = sessions
@@ -1131,8 +1548,16 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
             };
             let lo_ms = start * DAY_MS;
             let hi_ms = (end + 1) * DAY_MS;
-            let (head, kids, sess_rows, finals, obs) =
-                st.rtx(|(days, _, _, (subjects, evidence), sessions, ledger)| {
+            let (head, kids, sess_rows, finals, obs, digests) = st.rtx(
+                |(days, _, _, (subjects, evidence), sessions, ledger, (distilled, _))| {
+                    // the distilled paragraphs: this window's, its
+                    // children's, and (for a day) the stretches inside it
+                    let digests: std::collections::BTreeMap<String, DistRow> = distilled
+                        .iter()
+                        .filter_map(|(_, s): (String, DistStats)| s.row)
+                        .filter(|r| r.lane == Lane::Digest)
+                        .map(|r| (r.key.clone(), r))
+                        .collect();
                     let day_rows: std::collections::BTreeMap<u64, pipeline::DayStats> =
                         days.iter().collect();
                     let mut obs_per_day: std::collections::BTreeMap<u64, i64> = Default::default();
@@ -1185,8 +1610,25 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
                     }
                     finals.sort_by_key(|(_, ts, _)| std::cmp::Reverse(*ts));
                     finals.truncate(4);
-                    (head, kids, sess_rows, finals, obs_rows)
-                });
+                    (head, kids, sess_rows, finals, obs_rows, digests)
+                },
+            );
+            let mut head = head;
+            head.digest = ladder::window_key(&window, start, end)
+                .and_then(|k| digests.get(&k))
+                .map(|r| r.text.clone());
+            let mut kids = kids;
+            for b in &mut kids {
+                b.digest = b
+                    .handle
+                    .strip_prefix("peat ")
+                    .and_then(|k| digests.get(k))
+                    .map(|r| r.text.clone());
+            }
+            let stretches: Vec<&DistRow> = digests
+                .values()
+                .filter(|r| r.key.contains('#') && (lo_ms..hi_ms).contains(&r.ts_ms))
+                .collect();
             if json {
                 println!(
                     "{}",
@@ -1241,6 +1683,9 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
                     }
                 ))
             );
+            if let Some(d) = &head.digest {
+                println!("\n  {d}");
+            }
             if !kids.is_empty() {
                 println!("\n{}", ui::h1("within:"));
                 for b in &kids {
@@ -1254,8 +1699,12 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
                     } else {
                         format!(" · {}", b.files.join(", "))
                     };
+                    let (said, files) = match &b.digest {
+                        Some(d) => (format!("{d} {} ", ui::dim("·")), String::new()),
+                        None => (String::new(), files),
+                    };
                     println!(
-                        "  {} {} tools{f} · {} commits{}{files}  {}",
+                        "  {} {said}{} tools{f} · {} commits{}{files}  {}",
                         ui::dim(&format!("[{}]", b.label)),
                         ui::knum(b.tools),
                         b.commits,
@@ -1265,6 +1714,17 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
                             String::new()
                         },
                         ui::dim(&format!("▸ {}", b.handle)),
+                    );
+                }
+            }
+            if start == end && stretches.len() > 1 {
+                println!("\n{}", ui::h1("stretches:"));
+                for r in &stretches {
+                    println!(
+                        "  {} {}  {}",
+                        ui::dim(&format!("[{}]", short_sess(&r.session))),
+                        r.text,
+                        ui::dim(&format!("▸ peat {}", short_sess(&r.session))),
                     );
                 }
             }
@@ -1338,7 +1798,7 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
             };
             // the ledger mirror is what makes this possible: read every
             // event at-or-before the cutoff...
-            let events: Vec<(EventId, Envelope)> = st.rtx(|(_, _, _, _, _, ledger)| {
+            let events: Vec<(EventId, Envelope)> = st.rtx(|(_, _, _, _, _, ledger, _)| {
                 ledger
                     .iter()
                     .filter(|(_, e): &(EventId, Envelope)| e.ts_ms <= cutoff)
