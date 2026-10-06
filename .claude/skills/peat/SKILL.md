@@ -1,59 +1,47 @@
 ---
 name: peat
-description: Use when a repository has a .peat/ directory or peat hooks. Recovering what past sessions learned, reading a belief's evidence trail, searching prior work, time-travelling to what was believed on a date, or depositing a durable observation at a commit or task completion. Also when a brief appeared at session start and you need to act on it.
+description: Use when a repository has a .peat/ directory or peat hooks, or a peat brief appeared at session start. Acting on the user's standing rulings and open loops, recovering what past sessions did and decided, reading the evidence behind a line, searching prior work, or time-travelling to what was known on a date.
 ---
 
 # peat
 
-Agent memory as a fold: every session's exhaust lands in one append-forever ledger, and every read is a view over it. Hooks do the mechanical half (brief on wake, capture on stop). **Your half is judgment: read before deciding, deposit what a stranger would need.**
+This project's memory. Hooks capture every session into one append-forever ledger, and afterwards a distiller reads it and writes three things: **digests** (what happened, in words), **rulings** (the user's standing instructions) and **loops** (what was left unfinished). You do not have to write anything. **Your part: read before acting, follow a handle when a line matters, and say what you learned in your reply** — your replies are captured and distilled.
 
 ## Read
 
-Two verbs; every output line ends in the command that looks one level deeper. Follow those handles rather than guessing.
+The brief is injected at session start. Every line ends in `▸ peat …`, the command that opens it one level deeper; run it rather than guessing.
 
 ```bash
-peat                       # orient (already injected at session start)
-peat <thing>               # shape decides: window, session, subject, or search
-peat asof 2026-07-10 <words>   # what was believed then; then diff against now
-peat --help                # the explicit spellings
+peat                         # the brief again
+peat <thing>                 # shape decides: a window (w40, 2026-09, 2026-10-04), a session id, a subject, or search words
+peat rulings / peat loops    # the full registers (--all adds superseded, withdrawn, closed)
+peat asof 2026-07-10 <words> # what was known then
 ```
 
-Read the brief before acting. `standing rulings` are the user's own instructions, each ending in the command that shows the message it restates: follow them as you would the user. `open loops` are things left unfinished; check whether yours is among them before starting something new. Dated lines that read as prose are distilled summaries of what happened then. `current understanding` is prior judgment on this codebase, and `last session` is where the previous agent stopped. Before non-trivial design work, search once (`peat <words>`), then open the trail of any subject that matches (`peat <subject>`).
+- **Standing rulings** are the user's own instructions, newest wins. Follow them as you would the user; the handle shows the message each one restates.
+- **Open loops** are things left unfinished. Check whether your task is one before starting it fresh.
+- **Dated prose lines** (a day, a week, a month) say what happened then. Open one when you need the detail.
+- Lines headed `peat: from this project's memory` may arrive with a prompt: up to three past lines that match it. Judge each.
+- Before non-trivial design work, search once: `peat <words>`.
 
-How far to trust a line:
+## Trust
 
-- **Who wrote it.** A ruling restates the user and cites the message; a digest or loop was written afterwards by a model reading the log, and can be wrong in detail. An observation is an agent's claim. When a summary matters to a decision, follow its handle down to the events.
-- **Cited vs uncited.** An obs with `--from` seqs is grounded; `uncited` is a bare assertion. Open the trail before building on one.
-- **Newest wins.** A subject's headline is its latest obs; the trail holds every earlier one. Disagreement inside a trail is information.
-- **Briefs clip; trails don't.** A `…` line is an index entry. Never quote a clipped line as the claim.
-- **Age is on every hit.** A months-old belief about code may describe code that has moved. Verify against the tree before repeating it.
+- **Who wrote it.** A ruling restates the user and cites the message. A digest or loop is a model's reading of the log and can be wrong in detail. An observation (`current understanding`) is one agent's claim; `uncited` means it rests on nothing. When a line decides what you do, follow its handle down to the events.
+- **Age is on every line.** Something months old about code may describe code that has moved; check the tree before repeating it.
+- **Briefs clip; trails don't.** A line ending in `…` is an index entry, not the claim. Never quote it as one.
 
-## Deposit
+## Writing by hand (rare)
 
 ```bash
-peat obs <subject> "<one-line claim>" --from <seq>[,<seq>]
+peat obs <subject> "<one-line rule>" --from <seq>
 ```
 
-Where a ledger is distilled, what happened is written for you afterwards, so say what you learned in your reply and let it be captured. Deposit by hand only the thing a summary would lose: a rule that will outlive this task. The hooks nudge at commits and task completions. One claim per obs; a subject accrues support through repetition, and a revised belief is a new obs on the same subject.
-
-The test for a claim: read months later by an agent on another desk with no shared context, would it change what they do?
-
-- **A rule, not a story or a status.** The story is already in the ledger (cite it); status belongs in the tracker or the commit.
-- **No deixis.** Never "tonight", "just now", "this session", "the reviewer". The timestamp is recorded; prose about *now* rots immediately.
-- **Findable names.** Commands, paths, repo vocabulary. Not episode names ("the v3 rebuild", "the fix").
-- **Reuse subjects.** `peat subjects` lists them; the near-subject hint on write is a drift guard, not a suggestion to fork.
-- **Cite.** Seqs come from `peat <session>` and from search hits, addressed `session seq`.
-
-Bad: *"struck twice same evening: the v3 rebuild also ran a pre-Said binary; re-capture healed it silently"*
-Good: *"A precedent set in a zero-row domain can be wrong in a populated one: check every carried-forward pattern against the population it is about to meet."*
+Only for a rule a summary would lose and that will outlive this task. Not a status (that belongs in the tracker or commit), not a story (the ledger has it), no "today" or "this session". Reuse an existing subject (`peat subjects`).
 
 ## Don'ts
 
-- Don't run `peat capture` by hand; the hooks do, idempotently. Only after a `Hook cancelled` message, to recover a tail.
-- Don't paste brief or trail text into commits or issues; link the subject (`peat <subject>`).
-- Don't deposit a summary of the session. Deposit the one thing in it that was learned.
-- Don't touch `.peat/`. `.peat/off` pauses the hooks; everything else is the ledger and its views.
+- Don't run `peat capture` or `peat distill` by hand; the hooks do both. Exception: `peat capture <transcript>` after a `Hook cancelled` message, to recover a tail.
+- Don't paste brief text into commits or issues; give the handle.
+- Don't touch `.peat/`. `.peat/off` pauses peat, `.peat/distill-off` pauses the distiller, `.peat/push` turns on prompt-time lines.
 
-## Several desks, one memory
-
-Worktrees and secondary workspaces resolve to the main checkout's ledger automatically; `.peat/redirect` names an anchor explicitly. The brief's `active in the last hour` is the other agents; `current understanding` interleaves everyone's observations. Writers queue on one lock, so a slow `peat` is usually a peer, not a fault.
+Several desks share one ledger: `active in the last hour` is the other agents, and a slow `peat` is usually a peer holding the lock.

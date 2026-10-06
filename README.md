@@ -5,25 +5,35 @@
 Agent memory as a fold. Sessions deposit events — mechanical exhaust, plus what a distiller later writes about it — into one append-forever ledger, and every readable surface is a [bogkit/fold](https://github.com/flowercomputers/bogkit) view materialized incrementally over it. Sessions end; what they learned does not.
 
 ```console
-$ peat brief
-== peat brief · 2026-08-16 ==
+$ peat
+== peat brief · 2026-10-06 ==
 
-active in the last hour:
-  bog-a-thon [b575bd9d] — <1h ago, 15 commits
+standing rulings (the user's instructions, newest wins; each cites the message it restates):
+  peat-single-command-hooks (27d): Hooks should be one command, not complex bash
+  copied into each repo.  ▸ peat a2a9fc17 162
 
-current understanding (agent-asserted, newest wins):
-  fold-hnsw (1 obs, <1h): fold 0.0.1 Hnsw strands old vectors on intra-tx
-  upsert; patched in fork 640ff6f with red-proven regression
+open loops (left unfinished, newest first):
+  codex-hook-trust (2d): six Codex desks still need a /hooks trust pass for
+  `peat hook`.  ▸ peat a2a9fc17
+
+recent activity:
+  yesterday: Built the distiller: digests, rulings and loops as ledger events;
+  measured thinking on vs off on a real ledger. · 98 tools · 2 commits  ▸ peat 2026-10-05
+
+further back:
+  [sep] Replaced the Hnsw vector lane with an exact scan (0.3.0); unified the hooks
+  into `peat hook`; wrote the peat skill. · 1.1k tools · 18 commits  ▸ peat 2026-09
 ```
 
 Integration is one settings block and one installed binary; a wake reads in ~0.13 s over a 44k-event ledger, and the brief stays a bounded read however long the history grows. `capture` understands Claude Code transcripts and Codex rollouts (format auto-detected, unknown formats rejected). Subagent sessions do not fire the peat hooks — only top-level sessions deposit.
 
 ## Design
 
-Two goals, asymmetric effort:
+Three goals, asymmetric effort:
 
 1. **Capture is sacred.** A session is recorded once or never; the ledger is the investment. The event schema is versioned, evolution is additive-only, and ingestion is idempotent and never-fatal.
-2. **Everything else is disposable.** Views are replayable from the ledger, so any view, ranking, or rendering decision can be revised for free. The session-start prompt is a hot-editable template, never a pipeline change.
+2. **Memory is what reaches the context.** The working agent is the wrong author of its own memory, and an agent can only ask for what it has been shown exists. So a distiller writes the memory afterwards — digests, the user's rulings, open loops — as cited ledger events, and the brief shows the whole past in words, at a resolution that fades with age, with what holds (rulings, loops) ahead of what happened. See `.design/2026-10-05-memory-reaches-context.md`.
+3. **Everything else is disposable.** Views are replayable from the ledger, so any view, ranking, or rendering decision can be revised for free. The session-start prompt is a hot-editable template, never a pipeline change.
 
 Three invariants hold everywhere:
 
@@ -39,8 +49,8 @@ One `KeyedStream<EventId, Envelope>` carries every event. Each branch opens with
 Envelope @ (session, seq)
  ├─ day buckets      → Aggregate("days")        → Table      per-day digest: tools, fails, commits, files
  ├─ file touches     → Multimap("file_sessions")             file ↔ session index
- ├─ searchable text  → Bm25("kw")                            keyword index: obs, said, user, final, compact
- │        └─ distilled only → ese → Flat("vec")              exact-scan vector lane: obs + final messages only
+ ├─ searchable text  → Bm25("kw")                            keyword index: obs, said, user, final, compact, digest, ruling, loop
+ │        └─ dense text only → ese → Flat("vec")             exact-scan vector lane: everything above but said and long user messages
  │        └─ Table("texts")                                  hydration rows (kind, age, cited)
  ├─ observations     → Aggregate("subj") → Table("subjects") current understanding, newest wins
  │        └─ Multimap("evidence")                            full per-subject obs trail
@@ -50,11 +60,11 @@ Envelope @ (session, seq)
           └─ Multimap("dist_trail")                           every deposit, superseded ones included
 ```
 
-Everything is stock fold/ese/anny. One deliberate asymmetry: **vectors index only distilled text** (observations and final messages). The firehose — user messages, mid-session assistant messages, tool calls — stays BM25-only. Embedding is the expensive lane; it is reserved for the text with the highest signal density. Recall fuses both lanes with reciprocal-rank fusion.
+Everything is stock fold/ese/anny. One deliberate asymmetry: **vectors index only dense text** — observations, closing messages, compaction summaries, distilled digests, rulings and loops, and user messages short enough to be directives (≤400 bytes). The firehose — long pastes, mid-session assistant messages, tool calls — stays BM25-only. Embedding is the expensive lane; it is reserved for the text with the highest signal density. Recall fuses both lanes with reciprocal-rank fusion.
 
 ## Event schema
 
-`EventId = (SessionId, u32)`. The seq layout partitions three ranges:
+`EventId = (SessionId, u32)`. The seq layout partitions four ranges:
 
 | range                            | meaning                                                                             |
 | -------------------------------- | ----------------------------------------------------------------------------------- |
@@ -124,7 +134,7 @@ Every hook is the same two words, `peat hook`: the binary reads the harness's st
 
 ## Usage
 
-The learnable surface is two verbs; everything else is reachable from their output, because **every line of every read ends in the exact command that looks one level deeper**:
+The learnable surface is two verbs; everything else is reachable from their output, because **every line of every read ends in the exact command that looks one level deeper**. With the hooks installed, nothing has to be written by hand: capture and distillation run in the background.
 
 ```console
 $ peat                      # orient: the brief
@@ -132,7 +142,7 @@ $ peat <thing>              # look closer — shape decides:
 $ peat 2026-w33             #   a window (w33, 2026-07, 2026-08-14, q3, 2026, a..b)
 $ peat 36f96b8d             #   a session (hex id prefix; + seq for one event)
 $ peat fold hnsw fix        #   anything else: search (header names the reading)
-$ peat obs <subj> "<claim>" # deposit one observation
+$ peat rulings / peat loops # the registers that do not fade
 ```
 
 The explicit subcommands below are the unambiguous spellings of the same reads, and remain in `--help`.
@@ -146,7 +156,7 @@ captured 161 events from session b575bd9d-…
 
 Parses Claude Code transcript JSONL. **Unknown or unparseable lines are skipped, never fatal** — capture must succeed on a transcript it has never seen. Every event upserts by `(session, seq)`, so re-running the same transcript is a no-op and re-running a grown transcript ingests only the delta: this is the crash-recovery story. `--session <id>` supplies a session id when the transcript lacks one; `--final-msg <text>` (passed by the Stop hook from `last_assistant_message`) is authoritative over tail parsing, which can lag at stop time.
 
-### `peat obs <subject> <claim…>` — record one observation
+### `peat obs <subject> <claim…>` — record one observation by hand
 
 ```console
 $ peat obs fold-hnsw "intra-tx upsert strands old vectors; fixed in 640ff6f" --from 1042
@@ -154,7 +164,7 @@ near subjects: fold-hnsw-perf (1 obs)
 recorded → fold-hnsw (support 2)
 ```
 
-The one judgment step — one short sentence (deposits over ~240 chars earn a split-this nudge). `--from seq,seq` cites the mechanical events the claim rests on; an uncited obs is displayed as a bare assertion everywhere it appears. **Briefs clip; trails don't**: belief lines in the brief are an index, truncated at ~120 chars and ending in `▸ peat <subject>`, which reads the full newest-wins text and the complete evidence trail verbatim. Before writing, near-subject matches print as a drift guard. The session id resolves from `--session`, else `.peat/current-session` (written by the SessionStart hook). `--at YYYY-MM-DD` backdates for retroactive annotation — `asof` briefs for that day will carry it.
+For a rule a summary would lose; most of what an agent learns now reaches the ledger through its replies and the distiller. One short sentence (deposits over ~240 chars earn a split-this nudge). `--from seq,seq` cites the mechanical events the claim rests on; an uncited obs is displayed as a bare assertion everywhere it appears. **Briefs clip; trails don't**: belief lines in the brief are an index, truncated at ~120 chars and ending in `▸ peat <subject>`, which reads the full newest-wins text and the complete evidence trail verbatim. Before writing, near-subject matches print as a drift guard. The session id resolves from `--session`, else `.peat/current-session` (written by the SessionStart hook). `--at YYYY-MM-DD` backdates for retroactive annotation — `asof` briefs for that day will carry it.
 
 ### `peat distill` — write memory from the ledger
 
@@ -171,14 +181,14 @@ The working agent is the wrong author for its own memory: its attention is on th
 
 Because these are events and not view state, a bad summary is superseded by a newer one while the old stays in the trail, `asof` still replays the truth of a past day, and staleness is a fingerprint of the source text (`src`) rather than a clock. `--dry-run` counts what is stale; `--limit N` bounds the model calls of one run; `--session <prefix>` distills one session now.
 
-Hooks run it in the background once a ledger opts in:
+Hooks run it in the background: `SessionStart` sweeps sessions that have gone quiet, and `PreCompact` / `SessionEnd` distill the stretch that just closed. It runs on the CLI's subscription login (Claude Max) — the model command's environment has `ANTHROPIC_API_KEY` removed, which would otherwise take precedence and bill API usage.
 
 ```console
-$ touch .peat/distill     # SessionStart sweeps quiet sessions; PreCompact/SessionEnd distill the stretch that closed
-$ touch .peat/push        # each prompt gets up to 3 memory lines both search lanes agree on
+$ touch .peat/distill-off   # pause distilling on this ledger (.peat/off pauses all of peat)
+$ touch .peat/push          # opt in: each prompt gets up to 3 memory lines both search lanes agree on
 ```
 
-Both are off by default — the first spends model budget unattended, the second changes what every agent on the ledger sees. The model command reads the prompt on stdin and the system prompt from `$PEAT_SYSTEM`; a non-empty first line of `.peat/distill` (or `PEAT_DISTILL_CMD`) replaces the default `claude -p --model haiku …`. The default lets the model think: slower (about two minutes a call) but measurably better at rulings and at hitting the size target; prefix it with `MAX_THINKING_TOKENS=0` for a large backfill (about seven seconds a call). The ledger lock is never held across a model call. A command line in `.peat/distill` is honoured only while the marker is untracked: one that arrived with a clone would otherwise run in the background on every session start. What the distiller reads includes tool output, so text injected there can reach a digest and, through it, every later wake; the prompt forbids following instructions in the log, but nothing in code checks the result — a digest is a model's reading, and the skill says to treat it as one. **Every desk on a shared ledger must run a v4-aware peat before any of them distills** — an older binary cannot parse the new envelope.
+Push stays opt-in: it changes what every agent on the ledger sees on every prompt. The model command reads the prompt on stdin and the system prompt from `$PEAT_SYSTEM`; a non-empty first line of `.peat/distill` (or `PEAT_DISTILL_CMD`) replaces the default `claude -p --model haiku …`. The default lets the model think: slower (about two minutes a call) but measurably better at rulings and at hitting the size target; prefix it with `MAX_THINKING_TOKENS=0` for a large backfill (about seven seconds a call). The ledger lock is never held across a model call. A command line in `.peat/distill` is honoured only while the marker is untracked: one that arrived with a clone would otherwise run in the background on every session start. What the distiller reads includes tool output, so text injected there can reach a digest and, through it, every later wake; the prompt forbids following instructions in the log, but nothing in code checks the result — a digest is a model's reading, and the skill says to treat it as one. **Every desk on a shared ledger must run peat ≥ 0.4.0 before any of them distills** — an older binary cannot parse the new envelope, and since 0.4.1 the hooks distill by default.
 
 `peat rulings` and `peat loops` print the two registers in full (`--all` adds withdrawn, superseded and closed entries from the trail).
 
@@ -201,7 +211,7 @@ One window's digest, its children one rung finer (year → months → weeks → 
 
 ### `peat recall <query…>` — search, hits only
 
-Hybrid BM25 ⊕ HNSW recall with RRF fusion. Filters: `--kind obs|said|user|final|compact`, `--since <days>`, `--session <prefix>`, `--limit N`, or `--subject <name>` to read one subject's full evidence trail instead of searching.
+Hybrid BM25 ⊕ exact-scan vector recall with RRF fusion. Superseded digests, withdrawn rulings and closed loops are skipped. Filters: `--kind obs|said|user|final|compact|digest|ruling|loop`, `--since <days>`, `--session <prefix>`, `--limit N`, or `--subject <name>` to read one subject's full evidence trail instead of searching.
 
 ### `peat subjects` / `peat show <session> <seq>` / `peat events`
 
@@ -221,7 +231,8 @@ Reads every ledger event at or before the end of that **local** calendar day and
 - **Location**: `$PEAT_DB` if set, else `.peat/db` beside the nearest `.git`/`.jj` root above the working directory. `.peat/` belongs in `.gitignore`.
 - **Single writer.** fold is single-writer and reads are exclusive too. Colliding invocations wait with backoff (default 120 s, tune with `PEAT_LOCK_WAIT_SECS`), then exit 75 (`EX_TEMPFAIL`) with an explanation — never a raw panic. A bulk capture can legitimately hold the lock for minutes; short hook invocations interleave transparently.
 - **Durability**: bulk `capture` checkpoints the store afterward (memtable rotation) so subsequent opens do not replay a long journal; single-row writes deliberately do not, to keep the LSM's L0 healthy.
-- Deleting `.peat/db` loses nothing that a re-capture of the transcripts cannot rebuild — except observations, which live only in the ledger. Back up the ledger, not the views.
+- Deleting `.peat/db` loses nothing that a re-capture of the transcripts cannot rebuild — except observations and distilled events, which live only in the ledger (the second could be re-distilled, at the cost of every model call again). Back up the ledger, not the views.
+- Beside the database: `distill.lock` (one distiller per ledger, holding its pid), `distill.settled` (sessions found to have nothing to distill — a cache, safe to delete), and the optional markers `off`, `distill-off`, `push`, `distill`.
 
 ## Agent integration (Claude Code & Codex)
 
@@ -229,12 +240,12 @@ One command, `peat hook`, is wired to six moments (`peat hook install` does the 
 
 | moment               | `peat hook` does                                                                                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SessionStart`       | writes `.peat/current-session`, prints the brief — **stdout is injected into the session's context**; after a compaction, nudges deposit-from-summary; detaches a distill sweep where `.peat/distill` exists  |
+| `SessionStart`       | writes `.peat/current-session`, prints the brief — **stdout is injected into the session's context**; after a compaction, nudges deposit-from-summary; detaches a distill sweep unless `.peat/distill-off` exists  |
 | `UserPromptSubmit`   | once per session, invisible `additionalContext` nudge: deposit at natural completion points; where `.peat/push` exists, also up to 3 memory lines relevant to the prompt                                                            |
 | `PostToolUse` (Bash) | on `git commit`/`jj describe`/`just land`, nudges the agent (via `additionalContext`) to deposit an obs                                                |
 | `Stop`               | detached capture, `--final-msg` from `last_assistant_message` — **never blocks**                                                                       |
-| `PreCompact`         | detached salvage capture before the context window is replaced, then distills that stretch (opted-in ledgers)                                                                                        |
-| `SessionEnd`         | detached salvage capture on `/clear` and other non-Stop endings, then distills that stretch (opted-in ledgers)                                                                                       |
+| `PreCompact`         | detached salvage capture before the context window is replaced, then distills that stretch                                                                                        |
+| `SessionEnd`         | detached salvage capture on `/clear` and other non-Stop endings, then distills that stretch                                                                                       |
 
 Codex ≥0.148 supports the same hook set and stdin contract; `peat hook install --codex` wires it, and the Stop rollout fallback is built in. **On Codex the hooks must also be trusted before they run** — installing writes nothing that fires; run `/hooks` in the Codex CLI to review and trust. Trust is keyed to the hook's exact text, and that text is now the constant `peat hook`, so this happens once per desk rather than after every peat release. peat failing may never break a session: `peat hook` exits 0 on every path, and does nothing at all where no ledger exists or a `.peat/off` marker is present.
 
@@ -267,12 +278,15 @@ Two oracles are non-negotiable and written to be **red-capable** — each has a 
 1. **Retraction is observable**: upserting a revision over an event id makes the replaced text unfindable in both the keyword and vector indexes. An `#[ignore]`d twin asserts the opposite; `cargo test -p peat -- --ignored` must FAIL, proving the live oracle is not vacuous.
 2. **Replay determinism**: folding any prefix of the ledger equals an independent scan's prediction, at multiple cut points, and transaction batching is unobservable.
 
-Plus: idempotent double-capture, a golden test against a real (sanitized) transcript in `tests/fixtures/`, never-fatal parsing of unknown line types, and ISO-8601 round-tripping.
+Plus: idempotent double-capture, a golden test against a real (sanitized) transcript in `tests/fixtures/`, never-fatal parsing of unknown line types, ISO-8601 round-tripping, and the distiller's rules against a scripted model — a ruling must cite a user message that carries its words, a withdrawal must name the ruling it removes, only a standing loop closes, newer deposits supersede, and a second run over unchanged history makes no call.
 
 ## Deferred by decision, not oversight
 
 Belief support/flips semantics, `Merge{from,to}` subject-drift repair, session fingerprints, a `why` verb over the evidence trail, multi-writer spools; and, from the distiller's design (`.design/2026-10-05-memory-reaches-context.md` §5), verbatim leaves, a person-scoped home ledger, retiring the deposit nudges on distilled ledgers, a ladder over subjects, and push measuring its own follow-through. All are replay-backfillable later precisely because capture is total. The subjects view stays deliberately dumb (newest-wins): anything cleverer must be expressible as a fold over events still visible in the raw ledger.
 
 ## Performance
+
+Distillation runs on the model's own clock, in the background: about two minutes a call with thinking on (the default), about seven seconds with `MAX_THINKING_TOKENS=0`. A sweep spends at most 12 calls, and a run over unchanged history costs one read of two small tables.
+
 
 Measured on a ~44k-event ledger (28 sessions, including 100 MB+ transcripts): `brief` 0.13 s · semantic query 0.18 s · full `asof` replay of 14k events 1.2 s. The work that made those numbers (journal checkpointing, lazy HNSW recovery, per-key pending resolution in both search sinks) landed in `fold` itself on this branch.

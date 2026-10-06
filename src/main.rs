@@ -119,7 +119,7 @@ enum Cmd {
         #[arg(long)]
         final_msg: Option<String>,
         /// Then distill this session's stretch (hooks pass it when a
-        /// session ends or compacts; a no-op unless the ledger opted in)
+        /// session ends or compacts; a no-op where `.peat/distill-off` exists)
         #[arg(long, hide = true)]
         distill: bool,
     },
@@ -127,7 +127,7 @@ enum Cmd {
     /// captured and deposits digests (a paragraph per stretch, day, week,
     /// month), standing rulings (the user's instructions, each citing the
     /// message it restates), and open loops. Hooks run it in the
-    /// background once a ledger opts in (`touch .peat/distill`).
+    /// background (`touch .peat/distill-off` pauses that per ledger).
     /// Install this peat on every desk that shares the ledger first:
     /// older binaries cannot read what it writes
     Distill {
@@ -147,7 +147,7 @@ enum Cmd {
         /// Show what is stale; call no model
         #[arg(long)]
         dry_run: bool,
-        /// The form hooks run: silent, and only where the ledger opted in
+        /// The form hooks run: silent, and skipped where distilling is paused
         #[arg(long, hide = true)]
         sweep: bool,
         #[arg(long)]
@@ -422,7 +422,7 @@ fn run_distill(
     json: bool,
 ) {
     let dbp = db::db_path();
-    if sweep && (distill::marker(&dbp).is_none() || !dbp.is_dir()) {
+    if sweep && (distill::paused(&dbp) || !dbp.is_dir()) {
         return;
     }
     let Some(lock) = distill::RunLock::take(&dbp) else {

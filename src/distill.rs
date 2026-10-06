@@ -43,6 +43,9 @@ const DIGEST_WORDS: usize = 90;
 /// The model command: prompt on stdin, reply on stdout, the constant
 /// system prompt in `$PEAT_SYSTEM`. Tools off, no settings (so no hooks),
 /// no session file — a distiller run must leave no session to capture.
+/// It runs on the CLI's subscription login (Claude Max): `call_model`
+/// removes `ANTHROPIC_API_KEY`, which would otherwise take precedence and
+/// bill API usage.
 ///
 /// The model thinks by default, and that is deliberate. Side by side on
 /// one ledger (7 stretches): with thinking, 15 calls, every digest in
@@ -1259,9 +1262,14 @@ pub fn save_settled(db: &std::path::Path, mut known: BTreeMap<String, u64>, new:
 
 // ---------------------------------------------------------------- the model
 
-/// Hook-driven distillation is opt-in per ledger: it spends the user's
-/// model budget in the background, so a binary upgrade must not start it.
-/// The marker is a file named `distill` beside the database; a non-empty
+/// Hook-driven distillation is on wherever the hooks are. A file named
+/// `distill-off` beside the database pauses it for that ledger (`off`
+/// pauses all of peat).
+pub fn paused(db: &std::path::Path) -> bool {
+    db.parent().is_some_and(|d| d.join("distill-off").exists())
+}
+
+/// An optional file named `distill` beside the database: a non-empty
 /// first line overrides the model command.
 pub fn marker(db: &std::path::Path) -> Option<std::path::PathBuf> {
     let m = db.parent()?.join("distill");
@@ -1337,6 +1345,8 @@ pub fn call_model(cmd: &str, system: &str, user: &str) -> Result<String, String>
         .arg("-c")
         .arg(cmd)
         .env(GUARD_ENV, "1")
+        // the subscription login, never metered API usage
+        .env_remove("ANTHROPIC_API_KEY")
         .env("PEAT_SYSTEM", system)
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
@@ -2064,7 +2074,7 @@ mod tests {
     fn the_model_command_gets_stdin_the_system_prompt_and_the_guard() {
         assert_eq!(call_model("cat", "sys", "hello").unwrap(), "hello");
         let got = call_model(
-            "printf '%s|%s' \"$PEAT_DISTILLING\" \"$PEAT_SYSTEM\"",
+            "printf '%s|%s%s' \"$PEAT_DISTILLING\" \"$PEAT_SYSTEM\" \"${ANTHROPIC_API_KEY:+key}\"",
             "S",
             "",
         )

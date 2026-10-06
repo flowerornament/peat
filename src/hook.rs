@@ -309,8 +309,8 @@ pub fn run(event_override: Option<String>) -> Action {
                 let _ = std::fs::write(dir.join("current-session"), sid);
             }
             // the sweep: distill whatever went quiet since the last
-            // session started. Detached, and a no-op unless this ledger
-            // opted in (`peat distill --sweep` checks the marker).
+            // session started. Detached, and a no-op where this ledger
+            // paused it (`peat distill --sweep` checks `.peat/distill-off`).
             detach(
                 &["distill", "--sweep", "--since", "14", "--limit", "12"].map(std::ffi::OsStr::new),
             );

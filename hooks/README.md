@@ -29,7 +29,7 @@ Verified against the Claude Code hooks docs (2026-08-16) and Codex ≥0.148. The
 | stdin `hook_event_name` | mechanical                                                                                    | judged                                                                              |
 | ----------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | `SessionStart`          | writes `.peat/current-session`; prints the brief (**stdout is injected as context**), lock wait capped at 15 s | when `source` is `compact`: appends the deposit-from-summary nudge |
-| `SessionStart` (opt-in) | where `.peat/distill` exists: detaches `peat distill --sweep` (sessions quiet 20 min, last 14 days) | — |
+| `SessionStart` | unless `.peat/distill-off` exists: detaches `peat distill --sweep` (sessions quiet 20 min, last 14 days) | — |
 | `UserPromptSubmit`      | —                                                                                             | once per session (marker `.peat/nudged-<id>`): deposit at natural completion points |
 | `UserPromptSubmit` (opt-in) | where `.peat/push` exists: recall on the prompt, 2 s lock cap | up to 3 memory lines both search lanes agree on, once each per session |
 | `PostToolUse` (`Bash`)  | —                                                                                             | when the command contains `git commit` / `jj describe` / `just land`: deposit an obs |

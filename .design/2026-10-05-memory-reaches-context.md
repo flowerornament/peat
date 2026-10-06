@@ -232,3 +232,16 @@ Not taken:
 
 An older peat cannot parse a v4 envelope. Every desk on a shared ledger
 must run the new binary before any of them distills.
+
+## Amendment — 2026-10-06: on by default, subscription only
+
+The opt-in for distillation (§3.6) rested on one premise: that it spends
+model budget unattended. It does not. The distiller runs on the CLI's
+subscription login (Claude Max), and `call_model` now removes
+`ANTHROPIC_API_KEY` from the model command's environment: the key takes
+precedence over the claude.ai login when set, and would have billed API
+usage. With the premise gone, distillation runs wherever the hooks do;
+`.peat/distill-off` pauses it per ledger. Push keeps its opt-in, which
+rested on a different premise (it changes what every agent sees on every
+prompt).
+
