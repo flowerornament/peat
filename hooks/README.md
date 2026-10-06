@@ -20,7 +20,7 @@ $ peat hook install --check    # exit 0 if wired on all six events, else 1 and w
 $ peat hook install --print    # the snippet, for pasting by hand
 ```
 
-Install also writes the peat skill to `.claude/skills/peat/SKILL.md` (`--codex`: `.agents/skills/peat/SKILL.md`); `peat skill` prints it. Install is a merge, and idempotent: other keys and other tools' hooks (`bd prime`, formatters) are kept; any hook that invokes peat some other way — the copied snippets of releases before 0.3.1 — is removed so each event ends up with exactly one peat hook. It also creates the ledger if the desk has none, because `peat hook` is a no-op without one. The file is rewritten as pretty JSON with keys sorted.
+Install also writes the peat skill to `.claude/skills/peat/SKILL.md` (`--codex`: `.agents/skills/peat/SKILL.md`); `peat skill` prints it. Install is a merge, and idempotent: other keys and other tools' hooks (`bd prime`, formatters) are kept; any hook that invokes peat some other way — the copied snippets of releases before 0.4.0 — is removed so each event ends up with exactly one peat hook. It also creates the ledger if the desk has none, because `peat hook` is a no-op without one. The file is rewritten as pretty JSON with keys sorted.
 
 Verified against the Claude Code hooks docs (2026-08-16) and Codex ≥0.148. There are no `$CLAUDE_TRANSCRIPT_PATH` / `$CLAUDE_SESSION_ID` environment variables; hooks receive **stdin JSON**.
 
@@ -52,7 +52,7 @@ Two rules the implementation keeps, and that every path exits 0 to honour: **pea
 - the desk has no ledger — no `.peat/db`, no `.peat/redirect`, and no worktree anchor that has one (see **Worktree desks**);
 - a `.peat/off` file exists beside the desk's `.peat` or beside the shared ledger — the pause switch. `touch .peat/off` stops every seat of a shared ledger; `rm` resumes.
 
-(Releases before 0.3.1 used the inverse, an opt-in `READY` marker. Delete any you still have; they are ignored.)
+(Releases before 0.4.0 used the inverse, an opt-in `READY` marker. Delete any you still have; they are ignored.)
 
 ## Worktree desks
 

@@ -2,9 +2,9 @@
 
 All notable changes to peat. The ledger is the API to our past; so is this file.
 
-Entries prefixed **Hooks:** touch the hook contract. Since 0.3.1 every hook is the constant command `peat hook` and its behaviour ships with the binary, so an upgrade needs no re-sync; before that, hooks were copied bash snippets stamped `hooks snippet vN` and had to be re-copied by hand.
+Entries prefixed **Hooks:** touch the hook contract. Since 0.4.0 every hook is the constant command `peat hook` and its behaviour ships with the binary, so an upgrade needs no re-sync; before that, hooks were copied bash snippets stamped `hooks snippet vN` and had to be re-copied by hand.
 
-## Unreleased
+## 0.4.0 — 2026-10-06
 
 - **Memory is now written by a distiller, not only by the working agent.** An audit of two busy ledgers found 1,052 observations of which 8 cited anything, most of them status lines, against roughly 40 explicit reads — the agent in the middle of a task is the wrong author, and a wake made of tool counts gives nobody a reason to look closer. `peat distill` has a cheap model read the captured ledger and deposit **digests** (a paragraph per stretch of a session, merged upward into day, week, month, quarter and year under the ladder's own handles), **rulings** (the user's standing instructions; each must cite the user message it restates or it is discarded), and **loops** (things left unfinished, until a later stretch closes them). All three are ordinary ledger events (`Event::Distill`, **schema v4**), so they replay, supersede rather than overwrite, and stay honest under `asof`; staleness is a fingerprint of the source text, never a clock. Two new views (`distilled`, `dist_trail`) are fed only by the new events, so **no view rebuild happens**. See `.design/2026-10-05-memory-reaches-context.md`.
 - **The wake says the past in words.** The brief now opens with standing rulings and open loops, and any day or ladder band that has a digest prints it, keeping the counts as a suffix. `peat <window>` shows the window's paragraph, its children's, and a day's stretches. `peat rulings` / `peat loops` print the registers (`--all` for the trail). Recall and the brief drop superseded distilled text at read time.
