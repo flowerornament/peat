@@ -170,7 +170,7 @@ For a rule a summary would lose; most of what an agent learns now reaches the le
 
 ```console
 $ peat distill
-distilled 6 stretches, 9 windows · 3 rulings · 2 loops opened, 1 closed · 8 model calls (claude:haiku)
+distilled 6 stretches, 9 windows · 3 rulings · 2 loops opened, 1 closed · 8 model calls (claude)
 ```
 
 The working agent is the wrong author for its own memory: its attention is on the task, and what it writes when nudged is a status line. So a cheap model reads the captured ledger afterwards and deposits three things, each an ordinary ledger event (`Event::Distill`, schema v4):
@@ -188,7 +188,7 @@ $ touch .peat/distill-off   # pause distilling on this ledger (.peat/off pauses 
 $ touch .peat/push          # opt in: each prompt gets up to 3 memory lines both search lanes agree on
 ```
 
-Push stays opt-in: it changes what every agent on the ledger sees on every prompt. The model command reads the prompt on stdin and the system prompt from `$PEAT_SYSTEM`; a non-empty first line of `.peat/distill` (or `PEAT_DISTILL_CMD`) replaces the default `claude -p --model haiku …`. The default lets the model think: slower (about two minutes a call) but measurably better at rulings and at hitting the size target; prefix it with `MAX_THINKING_TOKENS=0` for a large backfill (about seven seconds a call). The ledger lock is never held across a model call. A command line in `.peat/distill` is honoured only while the marker is untracked: one that arrived with a clone would otherwise run in the background on every session start. What the distiller reads includes tool output, so text injected there can reach a digest and, through it, every later wake; the prompt forbids following instructions in the log, but nothing in code checks the result — a digest is a model's reading, and the skill says to treat it as one. **Every desk on a shared ledger must run peat ≥ 0.4.0 before any of them distills** — an older binary cannot parse the new envelope, and since 0.4.1 the hooks distill by default.
+Push stays opt-in: it changes what every agent on the ledger sees on every prompt. The model command reads the prompt on stdin and the system prompt from `$PEAT_SYSTEM`; a non-empty first line of `.peat/distill` (or `PEAT_DISTILL_CMD`) replaces the default `claude -p …`. The default names no model, so the distiller runs on whatever model you have chosen in Claude Code and follows it through new releases; to use another, put a command with `--model` in `.peat/distill`. The ledger lock is never held across a model call. A command line in `.peat/distill` is honoured only while the marker is untracked: one that arrived with a clone would otherwise run in the background on every session start. What the distiller reads includes tool output, so text injected there can reach a digest and, through it, every later wake; the prompt forbids following instructions in the log, but nothing in code checks the result — a digest is a model's reading, and the skill says to treat it as one. **Every desk on a shared ledger must run peat ≥ 0.4.0 before any of them distills** — an older binary cannot parse the new envelope, and since 0.4.1 the hooks distill by default.
 
 `peat rulings` and `peat loops` print the two registers in full (`--all` adds withdrawn, superseded and closed entries from the trail).
 
@@ -286,7 +286,7 @@ Belief support/flips semantics, `Merge{from,to}` subject-drift repair, session f
 
 ## Performance
 
-Distillation runs on the model's own clock, in the background: about two minutes a call with thinking on (the default), about seven seconds with `MAX_THINKING_TOKENS=0`. A sweep spends at most 12 calls, and a run over unchanged history costs one read of two small tables.
+Distillation runs on the model's own clock, in the background. A sweep spends at most 12 calls, and a run over unchanged history costs one read of two small tables.
 
 
 Measured on a ~44k-event ledger (28 sessions, including 100 MB+ transcripts): `brief` 0.13 s · semantic query 0.18 s · full `asof` replay of 14k events 1.2 s. The work that made those numbers (journal checkpointing, lazy HNSW recovery, per-key pending resolution in both search sinks) landed in `fold` itself on this branch.

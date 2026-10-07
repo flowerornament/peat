@@ -47,15 +47,11 @@ const DIGEST_WORDS: usize = 90;
 /// removes `ANTHROPIC_API_KEY`, which would otherwise take precedence and
 /// bill API usage.
 ///
-/// The model thinks by default, and that is deliberate. Side by side on
-/// one ledger (7 stretches): with thinking, 15 calls, every digest in
-/// size first try, 3 rulings all correctly cited, none discarded — at
-/// ~9k output tokens and ~2 min a call. With `MAX_THINKING_TOKENS=0`,
-/// 24 calls in 2.5 min total, but 7 proposed rulings failed the citation
-/// check and one that passed was embellished. Distillation runs in the
-/// background, so quality wins by default; prefix the command with
-/// `MAX_THINKING_TOKENS=0` for a large backfill.
-pub const DEFAULT_CMD: &str = "claude -p --model haiku --tools \"\" --setting-sources \"\" \
+/// No model is named: the CLI's own default answers — the model the user
+/// chose in Claude Code, which moves with every release without peat
+/// changing. (A cheap model was tried and was not worth the savings: on
+/// a subscription the memory's quality is the whole point.)
+pub const DEFAULT_CMD: &str = "claude -p --tools \"\" --setting-sources \"\" \
 --strict-mcp-config --no-session-persistence --system-prompt \"$PEAT_SYSTEM\"";
 
 /// Distilled rows past which the brief's read of the whole `distilled`
@@ -2057,7 +2053,7 @@ mod tests {
             "a segment is not a window"
         );
         assert_eq!(day_key(20_000), "2024-10-04");
-        assert_eq!(by_label(DEFAULT_CMD), "claude:haiku");
+        assert_eq!(by_label(DEFAULT_CMD), "claude");
         assert_eq!(by_label("/usr/bin/llm -s x"), "llm");
         assert_eq!(
             by_label("env -u KEY A=1 claude -p --model sonnet"),

@@ -4,6 +4,10 @@ All notable changes to peat. The ledger is the API to our past; so is this file.
 
 Entries prefixed **Hooks:** touch the hook contract. Since 0.4.0 every hook is the constant command `peat hook` and its behaviour ships with the binary, so an upgrade needs no re-sync; before that, hooks were copied bash snippets stamped `hooks snippet vN` and had to be re-copied by hand.
 
+## Unreleased
+
+- **The distiller names no model.** It runs `claude -p` on whatever model you have chosen in Claude Code (Opus, on a default Max setup) and follows new releases with no change to peat. It used to pass `--model haiku`, an API-cost habit that cost memory quality for no saving on a subscription. Pass `--model` in a `.peat/distill` command to choose another.
+
 ## 0.4.1 — 2026-10-06
 
 - **The distiller runs on your subscription, never on API billing.** `claude -p` prefers `ANTHROPIC_API_KEY` over the claude.ai login whenever the variable is set, so under 0.4.0 a shell that exported a key would have billed distillation as API usage. The model command now runs with `ANTHROPIC_API_KEY` removed from its environment, and uses the Max login.

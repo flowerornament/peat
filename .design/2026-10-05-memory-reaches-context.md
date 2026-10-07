@@ -245,3 +245,13 @@ usage. With the premise gone, distillation runs wherever the hooks do;
 rested on a different premise (it changes what every agent sees on every
 prompt).
 
+## Amendment — 2026-10-06: no model named
+
+The default command no longer names a model. `--model haiku` was an
+API-cost habit; on a subscription the memory's quality is the whole
+point, and a cheap model was not worth the savings. With no `--model`,
+`claude -p` answers on the user's own default (measured: Claude Opus 5.5,
+from `~/.claude/settings.json`), which follows new releases with nothing
+in peat to update. The thinking-on/off measurements in §3.6 were taken on
+Haiku and no longer describe the default.
+
