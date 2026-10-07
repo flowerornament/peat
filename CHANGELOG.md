@@ -4,7 +4,7 @@ All notable changes to peat. The ledger is the API to our past; so is this file.
 
 Entries prefixed **Hooks:** touch the hook contract. Since 0.4.0 every hook is the constant command `peat hook` and its behaviour ships with the binary, so an upgrade needs no re-sync; before that, hooks were copied bash snippets stamped `hooks snippet vN` and had to be re-copied by hand.
 
-## Unreleased
+## 0.4.0 — 2026-10-07
 
 v0.4.0 and v0.4.1 were tagged on 2026-10-06 and withdrawn the same day; this is the 0.4.0 that replaces them. Nothing either wrote reached a shared ledger.
 
