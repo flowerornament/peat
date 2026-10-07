@@ -8,7 +8,12 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped when the schema changes shape. Written into every envelope.
-pub const EVENT_VERSION: u16 = 4;
+pub const EVENT_VERSION: u16 = 3;
+
+/// Version stamped on envelopes in the memory sidecar (`.peat/memory`),
+/// the only store that holds [`Event::Distill`]. The ledger itself never
+/// carries one, so an older peat can always read the ledger.
+pub const MEMORY_VERSION: u16 = 4;
 
 pub type SessionId = String;
 
@@ -124,21 +129,21 @@ pub enum Event {
         basis: Option<Basis>,
     },
 
-    // ---- the distiller's lane ----
+    // ---- the distiller's lane (memory sidecar only) ----
     /// Something a model wrote *about* the ledger, deposited by `peat
-    /// distill` rather than by the working agent: a summary of a stretch
-    /// of history, a standing instruction the user gave, or an open loop.
-    /// It is an assertion like any other — an event, never view state —
-    /// so it is replayable, citable, and replaced only by a newer event
-    /// under the same `(lane, key)`. Added in v4; additive.
+    /// distill`: a paragraph standing in for a calendar window, or a
+    /// standing instruction the person gave. Lives only in the memory
+    /// sidecar (`.peat/memory`), never in the ledger: it is derived, the
+    /// ledger can re-derive it, and an older peat must always be able to
+    /// read the ledger. Within the sidecar it is an event like any other:
+    /// replaced only by a newer one under the same `(lane, key)`.
     Distill {
         lane: Lane,
-        /// What this is about: a segment (`<session>#<n>`) or calendar
-        /// window (`2026-10-04`, `2026-w40`, `2026-10`, `2026-q4`, `2026`)
-        /// for a digest; a kebab-case name for a ruling or a loop.
+        /// A calendar window (`2026-10-04`, `2026-w40`, `2026-10`,
+        /// `2026-q4`, `2026`) for a digest; a kebab-case name for a ruling.
         key: String,
         text: String,
-        /// Rulings: still in force. Loops: still open. Digests: always true.
+        /// Rulings: still in force (false = withdrawn). Digests: true.
         open: bool,
         /// The ledger events this rests on. A ruling always cites the
         /// user message it restates; a deposit that cannot is dropped.
@@ -151,14 +156,13 @@ pub enum Event {
     },
 }
 
-/// The three lifetimes distilled memory has. Digests fade (the ladder
-/// shows them coarser with age); rulings hold until superseded; loops
-/// hold until closed. Append-only: postcard encodes the variant index.
+/// The two lifetimes distilled memory has. Digests fade (the ladder shows
+/// them coarser with age); rulings hold until superseded or withdrawn.
+/// Append-only: postcard encodes the variant index.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Lane {
     Digest,
     Ruling,
-    Loop,
 }
 
 impl Lane {
@@ -166,7 +170,6 @@ impl Lane {
         match self {
             Lane::Digest => "digest",
             Lane::Ruling => "ruling",
-            Lane::Loop => "loop",
         }
     }
 }
@@ -334,6 +337,14 @@ impl Envelope {
             ts_ms,
             session: session.to_string(),
             kind,
+        }
+    }
+
+    /// An envelope for the memory sidecar, stamped [`MEMORY_VERSION`].
+    pub fn memory(session: &str, ts_ms: u64, kind: Event) -> Self {
+        Envelope {
+            v: MEMORY_VERSION,
+            ..Envelope::new(session, ts_ms, kind)
         }
     }
 }

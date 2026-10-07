@@ -543,23 +543,15 @@ fn parse_codex(
                     (session.clone(), seq),
                     Envelope::new(&session, ts, Event::Compaction {}),
                 ));
-                // the summary is payload.message when present, else the
-                // continuation handoff that replaced the window
+                // the summary is payload.message when present. Codex
+                // encrypts the real one (the last replacement_history item,
+                // type `compaction`, has no readable text), so there is
+                // usually none; the first replacement item is the session's
+                // opening prompt, not a summary, and must not stand in.
                 let text = payload
                     .get("message")
                     .and_then(Value::as_str)
-                    .filter(|t| !t.trim().is_empty())
-                    .or_else(|| {
-                        payload
-                            .get("replacement_history")?
-                            .as_array()?
-                            .first()?
-                            .get("content")?
-                            .as_array()?
-                            .first()?
-                            .get("text")?
-                            .as_str()
-                    });
+                    .filter(|t| !t.trim().is_empty());
                 if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
                     events.push((
                         (session.clone(), seq + 1),

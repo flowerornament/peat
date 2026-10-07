@@ -1,6 +1,6 @@
 # peat hooks — Claude Code & Codex integration
 
-The hooks are not an accessory: **installing peat means installing the hooks.** The binary alone is a CLI you must remember to run; the fabric — brief on wake, capture at every boundary, invisible deposit nudges — is entirely below.
+The hooks are not an accessory: **installing peat means installing the hooks.** The binary alone is a CLI you must remember to run; the fabric — brief on wake, capture at every boundary, memory distilled in the background — is entirely below.
 
 Every hook is the same command:
 
@@ -26,20 +26,17 @@ Verified against the Claude Code hooks docs (2026-08-16) and Codex ≥0.148. The
 
 ## What `peat hook` does at each moment
 
-| stdin `hook_event_name` | mechanical                                                                                    | judged                                                                              |
-| ----------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `SessionStart`          | writes `.peat/current-session`; prints the brief (**stdout is injected as context**), lock wait capped at 15 s | when `source` is `compact`: appends the deposit-from-summary nudge |
-| `SessionStart` | unless `.peat/distill-off` exists: detaches `peat distill --sweep` (sessions quiet 20 min, last 14 days) | — |
-| `UserPromptSubmit`      | —                                                                                             | once per session (marker `.peat/nudged-<id>`): deposit at natural completion points |
-| `UserPromptSubmit` (opt-in) | where `.peat/push` exists: recall on the prompt, 2 s lock cap | up to 3 memory lines both search lanes agree on, once each per session |
-| `PostToolUse` (`Bash`)  | —                                                                                             | when the command contains `git commit` / `jj describe` / `just land`: deposit an obs |
-| `Stop`                  | detached `peat capture <transcript> --final-msg <last_assistant_message>`                     | — (never blocks)                                                                    |
-| `PreCompact`            | detached salvage capture                                                                      | —                                                                                   |
-| `SessionEnd`            | detached salvage capture                                                                      | —                                                                                   |
+| stdin `hook_event_name` | does |
+| ----------------------- | ---- |
+| `SessionStart`          | writes `.peat/current-session`; prints the brief (**stdout is injected as context**), lock wait capped at 15 s; unless `.peat/distill-off` exists, detaches `peat distill --sweep` (last 14 days, at most 12 model calls, skipped when no session has grown) |
+| `UserPromptSubmit`      | where `.peat/push` exists: recall on the prompt (2 s lock cap) and up to 3 lines both search lanes agree on, once each per session, as invisible `additionalContext`; otherwise nothing |
+| `Stop`                  | detached `peat capture <transcript> --final-msg <last_assistant_message>` — never blocks |
+| `PreCompact`            | detached salvage capture |
+| `SessionEnd`            | detached salvage capture |
 
-The distill sweep is spawned on every `SessionStart`, compaction resumes included, and at most one runs per ledger (`distill.lock`). A sweep that finds the lock taken exits silently; the work it would have done waits for the next sweep, and nothing is lost because staleness is recomputed from the ledger each time. A session still in flight is not swept — its own `PreCompact` or `SessionEnd` distills it.
+peat no longer asks agents to write observations: the nudges at the first prompt, after commits and after compaction are gone (agents wrote few, and mostly status). `PostToolUse` is no longer installed; an old `peat hook` entry there does nothing.
 
-Nudges are printed as `{"hookSpecificOutput": {"hookEventName": …, "additionalContext": …}}` — the shape Codex requires and Claude Code accepts — so they are invisible to the user and weighed by the agent. `Stop` / `PreCompact` / `SessionEnd` print nothing.
+The distill sweep is spawned on every `SessionStart`, and a compaction restarts the session, so it also follows every compaction. At most one runs per ledger (`distill.lock`, holding its pid). A sweep that finds the lock taken exits silently; the work waits for the next sweep, and nothing is lost because staleness is recomputed from the ledger each time. Only closed local days are distilled, so a session in flight is never summarized mid-day.
 
 Captures run detached: `peat hook` spawns `peat capture` in its own process group with stdio closed and returns in milliseconds, so a harness deadline or teardown cannot cancel the work. The closing message travels as an argv element, never re-quoted through a shell — a hostile final message (quotes, backticks, `$VAR`, backslashes) round-trips byte-exact. On Codex, when the Stop payload carries no `transcript_path`, the rollout is found under `~/.codex/sessions/` by session id.
 
@@ -82,11 +79,11 @@ $ peat <that-id>                 # the session should exist in the ledger after 
 
 If `current-session` still holds an older id, the hook did not run — on Codex the usual cause is pending review in `/hooks`.
 
-You can also fire it by hand with a synthetic payload; both branches of each judged moment should behave:
+You can also fire it by hand with a synthetic payload:
 
 ```console
-$ echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"git commit -m x"}}' | peat hook   # prints a nudge
-$ echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}' | peat hook                 # prints nothing, exit 0
+$ echo '{"hook_event_name":"UserPromptSubmit","session_id":"x","prompt":"why does the land gate fail on clippy?"}' | peat hook   # push lines where .peat/push exists, else nothing
+$ echo '{"hook_event_name":"Whatever"}' | peat hook   # prints nothing, exit 0
 ```
 
 (A synthetic `SessionStart` overwrites `.peat/current-session`; do that only in a desk with no live session.)
@@ -111,21 +108,20 @@ $ peat capture ~/.claude/projects/<slug>/<session-id>.jsonl
 
 ## Compaction
 
-`PreCompact` fires before compaction replaces the context window: it cannot consult the agent (no turn exists), so it runs a mechanical salvage capture — idempotent upserts make the later Stop capture re-cover the same events for free. The compactor's own summary is captured as a `CompactSummary` event whenever the transcript is ingested, and the next `SessionStart` (`source: compact`) nudges the agent to deposit, from the summary it now has, anything durable it learned before the cut.
+`PreCompact` fires before compaction replaces the context window: it cannot consult the agent (no turn exists), so it runs a mechanical salvage capture — idempotent upserts make the later Stop capture re-cover the same events for free. Claude Code's own summary is captured as a `CompactSummary` event whenever the transcript is ingested, and it is one of the distiller's inputs for that day. Codex encrypts its compaction summary, so a Codex compaction leaves only the marker.
 
 ## The moment-coverage matrix
 
 Every moment a session can produce or lose knowledge, and the hook that covers it:
 
-| moment                            | hook                                                         | mechanical                                    | judged                                                                                       |
-| --------------------------------- | ------------------------------------------------------------ | --------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| session begins                    | `SessionStart`                                               | brief injected as context; session id written | —                                                                                            |
-| first user prompt                 | `UserPromptSubmit`                                           | —                                             | invisible `additionalContext` nudge: deposit at natural completion points (once per session) |
-| a commit lands                    | `PostToolUse` (Bash: `git commit`/`jj describe`/`just land`) | —                                             | nudge: deposit an obs                                                                        |
-| every stop                        | `Stop`                                                       | capture (`--final-msg` authoritative)         | — (never blocks)                                                                             |
-| context about to compact          | `PreCompact`                                                 | salvage capture                               | —                                                                                            |
-| session resumes after compact     | `SessionStart` (`source: compact`)                           | brief                                         | nudge: deposit from the compact summary                                                      |
-| `/clear` or other non-Stop ending | `SessionEnd`                                                 | salvage capture                               | — (the session is gone)                                                                      |
+| moment                            | hook                              | does |
+| --------------------------------- | --------------------------------- | ---- |
+| session begins                    | `SessionStart`                    | brief injected as context; session id written; distill sweep detached |
+| a prompt arrives                  | `UserPromptSubmit`                | push, where `.peat/push` exists |
+| every stop                        | `Stop`                            | capture (`--final-msg` authoritative) — never blocks |
+| context about to compact          | `PreCompact`                      | salvage capture |
+| session resumes after compact     | `SessionStart` (`source: compact`) | brief; distill sweep detached |
+| `/clear` or other non-Stop ending | `SessionEnd`                      | salvage capture |
 
 Codex parity was verified end to end at 0.149: matchers and the stdin contract are identical (`session_id`, `transcript_path`, `cwd` all arrive as documented), and `SessionStart` stdout *is* injected into the Codex model's context. Subagent sessions do not fire the peat hooks — only top-level sessions deposit.
 

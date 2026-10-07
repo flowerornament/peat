@@ -48,10 +48,9 @@ impl Fabric {
 }
 
 /// The six moments peat covers, in the harness's spelling.
-pub const EVENTS: [&str; 6] = [
+pub const EVENTS: [&str; 5] = [
     "SessionStart",
     "UserPromptSubmit",
-    "PostToolUse",
     "Stop",
     "PreCompact",
     "SessionEnd",
@@ -64,10 +63,7 @@ pub struct Input {
     pub event: String,
     pub session_id: Option<String>,
     pub transcript_path: Option<String>,
-    pub source: Option<String>,
     pub last_assistant_message: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_command: Option<String>,
     /// UserPromptSubmit: what the user just typed.
     pub prompt: Option<String>,
 }
@@ -80,15 +76,8 @@ impl Input {
             event: s("hook_event_name").unwrap_or_default(),
             session_id: s("session_id").filter(|x| !x.is_empty()),
             transcript_path: s("transcript_path").filter(|x| !x.is_empty()),
-            source: s("source"),
             last_assistant_message: s("last_assistant_message").filter(|x| !x.trim().is_empty()),
-            tool_name: s("tool_name"),
             prompt: s("prompt").filter(|x| !x.trim().is_empty()),
-            tool_command: v
-                .get("tool_input")
-                .and_then(|t| t.get("command"))
-                .and_then(|c| c.as_str())
-                .map(str::to_string),
         }
     }
 }
@@ -97,20 +86,13 @@ impl Input {
 /// and a few filesystem facts, so it is testable without a harness.
 #[derive(Debug, PartialEq)]
 pub enum Action {
-    /// Nothing to do (unknown event, missing field, nudge already sent).
+    /// Nothing to do (unknown event, missing field, push not opted in).
     Nothing,
-    /// Print the brief; then, if `compacted`, the post-compaction nudge.
-    Brief { compacted: bool },
-    /// Emit `additionalContext` (invisible to the user, weighed by the agent).
-    Nudge(&'static str),
-    /// Search memory for this prompt and inject what both lanes agree on,
-    /// along with the first-prompt nudge when one is due. Needs the open
-    /// ledger, so it is handed back to `main` like the brief.
-    Push {
-        session: String,
-        prompt: String,
-        nudge: Option<&'static str>,
-    },
+    /// Print the brief.
+    Brief,
+    /// Search memory for this prompt and inject what both lanes agree on.
+    /// Needs the open ledger, so it is handed back to `main` like the brief.
+    Push { session: String, prompt: String },
     /// Detach a capture of this transcript with this closing message.
     Capture {
         transcript: PathBuf,
@@ -118,43 +100,24 @@ pub enum Action {
     },
 }
 
-const NUDGE_FIRST_PROMPT: &str = "peat is recording this session. At natural completion points \
-— a commit, a finished task — deposit durable knowledge: \
-peat obs <subject> \"<one-line claim>\" [--from seq,seq]. \
-Read a belief trail with: peat <subject>.";
-
-const NUDGE_COMMIT: &str = "a commit landed — deposit peat obs <subject> \"<one-line claim>\" \
-for anything durable learned this change";
-
-pub const NUDGE_COMPACT: &str = "peat: context was just compacted — if durable knowledge from \
-before the compaction is not yet deposited, do it now from the summary: \
-peat obs <subject> \"<one-line claim>\"";
-
-/// Commands whose completion is a natural deposit point.
-fn is_commit(cmd: &str) -> bool {
-    ["git commit", "jj describe", "just land"]
-        .iter()
-        .any(|m| cmd.contains(m))
-}
-
-/// Decide the action. `nudged` answers "has this session already had the
-/// first-prompt nudge?" and is passed in so the decision stays pure.
-pub fn plan(input: &Input, nudged: impl Fn(&str) -> bool) -> Action {
+/// Decide the action. `push` answers "has this ledger opted in to
+/// prompt-time push?" and is passed in so the decision stays pure.
+///
+/// peat no longer asks agents to write observations (the nudges at the
+/// first prompt, after commits and after compaction are gone): agents
+/// wrote them rarely and mostly as status, and the distiller now writes
+/// memory from what the harness already records. See
+/// `.design/2026-10-07-distill-reads-the-harness.md`.
+pub fn plan(input: &Input, push: bool) -> Action {
     match input.event.as_str() {
-        "SessionStart" => Action::Brief {
-            compacted: input.source.as_deref() == Some("compact"),
+        "SessionStart" => Action::Brief,
+        "UserPromptSubmit" => match push_for(input, push) {
+            Some((sid, prompt)) => Action::Push {
+                session: sid.to_string(),
+                prompt: prompt.to_string(),
+            },
+            None => Action::Nothing,
         },
-        "UserPromptSubmit" => match &input.session_id {
-            Some(sid) if !nudged(sid) => Action::Nudge(NUDGE_FIRST_PROMPT),
-            _ => Action::Nothing,
-        },
-        "PostToolUse" => {
-            let bash = input.tool_name.as_deref().is_none_or(|t| t == "Bash");
-            match &input.tool_command {
-                Some(c) if bash && is_commit(c) => Action::Nudge(NUDGE_COMMIT),
-                _ => Action::Nothing,
-            }
-        }
         "Stop" | "PreCompact" | "SessionEnd" => {
             let transcript = input
                 .transcript_path
@@ -203,11 +166,6 @@ fn codex_rollout(session: &str) -> Option<PathBuf> {
         None
     }
     walk(&root, session, 6)
-}
-
-/// The once-per-session marker for the first-prompt nudge, desk-local.
-fn nudge_marker(sid: &str) -> PathBuf {
-    db::peat_dir().join(format!("nudged-{sid}"))
 }
 
 /// Is peat switched on for this desk? The ledger must exist (or resolve
@@ -281,28 +239,9 @@ pub fn run(event_override: Option<String>) -> Action {
     if !enabled() || std::env::var_os(crate::distill::GUARD_ENV).is_some() {
         return Action::Nothing;
     }
-    let action = plan(&input, |sid| nudge_marker(sid).exists());
-    let mark_nudged = |sid: &str| {
-        let m = nudge_marker(sid);
-        let _ = std::fs::create_dir_all(m.parent().unwrap());
-        let _ = std::fs::write(m, "");
-    };
-    if let Some((sid, prompt)) = push_for(&input, push_enabled()) {
-        let nudge = match action {
-            Action::Nudge(text) => {
-                mark_nudged(sid);
-                Some(text)
-            }
-            _ => None,
-        };
-        return Action::Push {
-            session: sid.to_string(),
-            prompt: prompt.to_string(),
-            nudge,
-        };
-    }
+    let action = plan(&input, push_enabled());
     match &action {
-        Action::Brief { .. } => {
+        Action::Brief => {
             if let Some(sid) = &input.session_id {
                 let dir = db::peat_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -315,20 +254,12 @@ pub fn run(event_override: Option<String>) -> Action {
                 &["distill", "--sweep", "--since", "14", "--limit", "12"].map(std::ffi::OsStr::new),
             );
         }
-        Action::Nudge(text) => {
-            if input.event == "UserPromptSubmit"
-                && let Some(sid) = &input.session_id
-            {
-                mark_nudged(sid);
-            }
-            println!("{}", nudge_json(&input.event, text));
-        }
         Action::Capture {
             transcript,
             final_msg,
             // a turn ending is not a stretch ending; the two moments that
             // close one (context replaced, session over) distill it
-        } => detach_capture(transcript, final_msg.as_deref(), input.event != "Stop"),
+        } => detach_capture(transcript, final_msg.as_deref()),
         Action::Nothing | Action::Push { .. } => {}
     }
     action
@@ -348,13 +279,10 @@ pub fn nudge_json(event: &str, text: &str) -> String {
 
 /// Detach `peat capture`. Arguments travel as argv — the closing
 /// message is never re-quoted through a shell.
-fn detach_capture(transcript: &Path, final_msg: Option<&str>, distill: bool) {
+fn detach_capture(transcript: &Path, final_msg: Option<&str>) {
     let mut args: Vec<&std::ffi::OsStr> = vec!["capture".as_ref(), transcript.as_os_str()];
     if let Some(m) = final_msg {
         args.extend(["--final-msg".as_ref(), std::ffi::OsStr::new(m)]);
-    }
-    if distill {
-        args.push("--distill".as_ref());
     }
     detach(&args);
 }
@@ -407,9 +335,6 @@ pub fn snippet() -> serde_json::Value {
     let mut hooks = serde_json::Map::new();
     for ev in EVENTS {
         let mut group = serde_json::Map::new();
-        if ev == "PostToolUse" {
-            group.insert("matcher".into(), "Bash".into());
-        }
         group.insert("hooks".into(), serde_json::Value::Array(vec![entry()]));
         hooks.insert(ev.into(), serde_json::Value::Array(vec![group.into()]));
     }
@@ -439,6 +364,41 @@ pub fn merge(
     }
     let hooks = hooks.as_object_mut().unwrap();
     let mut changed = false;
+    // events peat no longer uses (PostToolUse carried the commit nudge):
+    // drop every peat entry there, legacy snippet or one-verb, so an
+    // upgrade's install really removes what the release removed
+    let retired: Vec<String> = hooks
+        .keys()
+        .filter(|k| !EVENTS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    for ev in retired {
+        let Some(groups) = hooks.get_mut(&ev).and_then(|g| g.as_array_mut()) else {
+            continue;
+        };
+        for g in groups.iter_mut() {
+            if let Some(list) = g.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                let before = list.len();
+                list.retain(|h| {
+                    !h.get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| c == "peat hook" || is_legacy(c))
+                });
+                changed |= list.len() != before;
+            }
+        }
+        let before = groups.len();
+        groups.retain(|g| {
+            g.get("hooks")
+                .and_then(|h| h.as_array())
+                .is_none_or(|l| !l.is_empty())
+        });
+        changed |= groups.len() != before;
+        if groups.is_empty() {
+            hooks.remove(&ev);
+            changed = true;
+        }
+    }
     for ev in EVENTS {
         let groups = hooks
             .entry(ev)
@@ -539,7 +499,7 @@ pub fn install(root: &Path, fabric: Fabric, check: bool) -> Result<String, Strin
             ))
         };
     }
-    let changed = merge(&mut config, |ev| (ev == "PostToolUse").then_some("Bash"));
+    let changed = merge(&mut config, |_| None);
     if changed {
         let _ = std::fs::create_dir_all(path.parent().unwrap());
         let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
@@ -569,11 +529,11 @@ mod tests {
 
     #[test]
     fn parses_the_fields_hooks_carry() {
-        let raw = r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash",
-            "tool_input":{"command":"git commit -m x"},"transcript_path":""}"#;
+        let raw = r#"{"hook_event_name":"Stop","session_id":"s1","last_assistant_message":"done",
+            "transcript_path":""}"#;
         let i = Input::parse(raw);
-        assert_eq!(i.event, "PostToolUse");
-        assert_eq!(i.tool_command.as_deref(), Some("git commit -m x"));
+        assert_eq!(i.event, "Stop");
+        assert_eq!(i.last_assistant_message.as_deref(), Some("done"));
         assert_eq!(i.transcript_path, None, "empty path is absent");
         assert_eq!(Input::parse("not json"), Input::default());
     }
@@ -619,36 +579,13 @@ mod tests {
     }
 
     #[test]
-    fn session_start_briefs_and_flags_compaction() {
-        let mut i = input("SessionStart");
-        assert_eq!(plan(&i, |_| false), Action::Brief { compacted: false });
-        i.source = Some("compact".into());
-        assert_eq!(plan(&i, |_| false), Action::Brief { compacted: true });
-    }
-
-    #[test]
-    fn first_prompt_nudges_once() {
-        let i = input("UserPromptSubmit");
-        assert!(matches!(plan(&i, |_| false), Action::Nudge(_)));
-        assert_eq!(plan(&i, |_| true), Action::Nothing);
-        let mut no_sid = i;
-        no_sid.session_id = None;
-        assert_eq!(plan(&no_sid, |_| false), Action::Nothing);
-    }
-
-    #[test]
-    fn commit_nudge_matches_the_three_verbs_only() {
-        let mut i = input("PostToolUse");
-        i.tool_name = Some("Bash".into());
-        for c in ["git commit -m x", "jj describe -m y", "just land"] {
-            i.tool_command = Some(c.into());
-            assert!(matches!(plan(&i, |_| false), Action::Nudge(_)), "{c}");
-        }
-        i.tool_command = Some("cargo test".into());
-        assert_eq!(plan(&i, |_| false), Action::Nothing);
-        i.tool_command = Some("git commit".into());
-        i.tool_name = Some("Read".into());
-        assert_eq!(plan(&i, |_| false), Action::Nothing);
+    fn session_start_briefs_and_prompts_push_only_when_opted_in() {
+        assert_eq!(plan(&input("SessionStart"), false), Action::Brief);
+        let mut i = input("UserPromptSubmit");
+        i.prompt = Some("why does the land gate fail on clippy?".into());
+        assert_eq!(plan(&i, false), Action::Nothing, "no nudge, no push");
+        assert!(matches!(plan(&i, true), Action::Push { .. }));
+        assert_eq!(plan(&input("PostToolUse"), true), Action::Nothing);
     }
 
     #[test]
@@ -656,7 +593,7 @@ mod tests {
         let mut i = input("Stop");
         i.last_assistant_message = Some("done: `x` $HOME \"q\"".into());
         assert_eq!(
-            plan(&i, |_| false),
+            plan(&i, false),
             Action::Capture {
                 transcript: "/t/abc123.jsonl".into(),
                 final_msg: Some("done: `x` $HOME \"q\"".into())
@@ -664,7 +601,7 @@ mod tests {
         );
         i.event = "PreCompact".into();
         assert_eq!(
-            plan(&i, |_| false),
+            plan(&i, false),
             Action::Capture {
                 transcript: "/t/abc123.jsonl".into(),
                 final_msg: None
@@ -672,15 +609,36 @@ mod tests {
         );
         i.transcript_path = None;
         i.session_id = Some("no-such-session-anywhere".into());
-        assert_eq!(plan(&i, |_| false), Action::Nothing);
-        assert_eq!(plan(&input("Whatever"), |_| false), Action::Nothing);
+        assert_eq!(plan(&i, false), Action::Nothing);
+        assert_eq!(plan(&input("Whatever"), false), Action::Nothing);
     }
 
     #[test]
     fn nudge_json_is_the_nested_shape() {
-        let v: serde_json::Value = serde_json::from_str(&nudge_json("PostToolUse", "hi")).unwrap();
-        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        let v: serde_json::Value =
+            serde_json::from_str(&nudge_json("UserPromptSubmit", "hi")).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
         assert_eq!(v["hookSpecificOutput"]["additionalContext"], "hi");
+    }
+
+    #[test]
+    fn install_removes_peat_from_events_it_no_longer_uses() {
+        let mut cfg = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type":"command","command":"in=$(cat); case \"$c\" in *git\\ commit*) echo '{\"additionalContext\":\"deposit peat obs\"}';; esac"}]},
+                    {"matcher": "Bash", "hooks": [{"type":"command","command":"peat hook"}]}
+                ],
+                "Notification": [{"hooks": [{"type":"command","command":"say done"}]}]
+            }
+        });
+        assert!(merge(&mut cfg, |_| None));
+        assert!(cfg["hooks"].get("PostToolUse").is_none(), "{cfg}");
+        assert_eq!(
+            cfg["hooks"]["Notification"][0]["hooks"][0]["command"], "say done",
+            "other tools' hooks survive, on any event"
+        );
+        assert!(!merge(&mut cfg, |_| None), "second merge changes nothing");
     }
 
     #[test]
@@ -695,7 +653,7 @@ mod tests {
                 "Stop": [{"hooks": [{"type":"command","command":"in=$(cat); nohup peat capture \"$TP\" &"}]}]
             }
         });
-        let m = |ev: &str| (ev == "PostToolUse").then_some("Bash");
+        let m = |_: &str| None;
         assert!(merge(&mut cfg, m));
         assert_eq!(installed_events(&cfg).len(), EVENTS.len());
         assert_eq!(
@@ -713,7 +671,6 @@ mod tests {
             "legacy peat group removed, one-verb group added"
         );
         assert_eq!(cfg["hooks"]["Stop"].as_array().unwrap().len(), 1);
-        assert_eq!(cfg["hooks"]["PostToolUse"][0]["matcher"], "Bash");
         assert!(!merge(&mut cfg, m), "second merge changes nothing");
     }
 

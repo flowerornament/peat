@@ -12,9 +12,7 @@ use fold::stream::Readable;
 
 use crate::event::{EventId, Lane};
 use crate::ladder;
-use crate::pipeline::{
-    DAY_MS, DayStats, DistRow, DistStats, ObsRow, SessStats, SubjStats, TextRow, standing,
-};
+use crate::pipeline::{DAY_MS, DayStats, DistRow, ObsRow, SessStats, SubjStats, TextRow, standing};
 use crate::transcript::{date_label, local_offset_ms};
 use crate::ui::{self, age_label, short_path, short_sess};
 
@@ -64,18 +62,13 @@ pub fn last_session<'a>(
     }
 }
 
-/// How many standing rulings and open loops the wake prints before it
-/// points at the full register.
-const RULINGS_SHOWN: usize = 20;
-const LOOPS_SHOWN: usize = 12;
-/// A loop nobody has touched for this long is more likely forgotten than
-/// live. It stays open on the record (`peat loops`) but leaves the wake:
-/// a list of stale reminders teaches its reader to skip the list.
-const LOOP_FRESH_MS: u64 = 30 * DAY_MS;
+/// How many standing rulings the wake prints before it points at the
+/// full register.
+const RULINGS_SHOWN: usize = 10;
 
-/// Kinds worth pushing unasked: distilled or judged text, never the raw
+/// Kinds worth pushing unasked: judged or summarizing text, never the raw
 /// firehose (user messages, mid-task chatter).
-const PUSH_KINDS: [&str; 6] = ["ruling", "loop", "digest", "obs", "final", "compact"];
+const PUSH_KINDS: [&str; 3] = ["obs", "final", "compact"];
 
 /// What to put in front of an agent the moment a prompt arrives: hits the
 /// keyword and vector lanes *agree* on, from other sessions, not already
@@ -135,12 +128,9 @@ pub fn push_text(hits: &[(EventId, TextRow)], now: u64) -> String {
 #[derive(serde::Serialize)]
 pub struct Brief {
     pub today: String,
-    /// standing instructions from the user: hold until superseded
+    /// standing instructions from the person: hold until superseded
     rulings: Vec<serde_json::Value>,
     rulings_more: usize,
-    /// unfinished things: hold until closed
-    loops: Vec<serde_json::Value>,
-    loops_more: usize,
     active: Vec<serde_json::Value>,
     days: Vec<serde_json::Value>,
     /// the temporal ladder: the rest of the past, geometrically coarser,
@@ -168,22 +158,20 @@ pub fn assemble<R: Readable>(
     subjects: &TableReader<'_, R, String, SubjStats>,
     evidence: &MultimapReader<'_, R, String, ObsRow>,
     sessions: &TableReader<'_, R, String, SessStats>,
-    distilled: &TableReader<'_, R, String, DistStats>,
+    dist: &[DistRow],
     desk: &std::path::Path,
 ) -> Brief {
     let today_bucket = now / DAY_MS;
 
-    // ---- the distilled lane, read once: digests by window key, and the
-    // two registers that do not fade
-    let dist: Vec<DistRow> = distilled.iter().filter_map(|(_, s)| s.row).collect();
-    // window digests only: the bands and days look these up by handle
+    // ---- the memory sidecar (read by the caller): window digests, which
+    // the bands and days look up by handle, and the rulings register
     let windows: HashMap<&str, &str> = dist
         .iter()
-        .filter(|r| r.lane == Lane::Digest && !r.key.contains('#'))
+        .filter(|r| r.lane == Lane::Digest)
         .map(|r| (r.key.as_str(), r.text.as_str()))
         .collect();
     let digest_of = |key: &str| windows.get(key).map(|t| (*t).to_string());
-    let rulings = standing(&dist, Lane::Ruling);
+    let rulings = standing(dist, Lane::Ruling);
     let rulings_out: Vec<serde_json::Value> = rulings
         .iter()
         .take(RULINGS_SHOWN)
@@ -192,19 +180,6 @@ pub fn assemble<R: Readable>(
                 "subject": r.key, "text": r.text, "age": age_label(now, r.ts_ms),
                 // the citation is the expansion path: the user's own message
                 "handle": r.cites.first().map(|(s, q)| format!("▸ peat {} {q}", short_sess(s))),
-            })
-        })
-        .collect();
-    let loops = standing(&dist, Lane::Loop);
-    let fresh = |r: &&&DistRow| now.saturating_sub(r.ts_ms) <= LOOP_FRESH_MS;
-    let loops_out: Vec<serde_json::Value> = loops
-        .iter()
-        .filter(fresh)
-        .take(LOOPS_SHOWN)
-        .map(|r| {
-            serde_json::json!({
-                "key": r.key, "text": r.text, "age": age_label(now, r.ts_ms),
-                "handle": format!("▸ peat {}", short_sess(&r.session)),
             })
         })
         .collect();
@@ -363,8 +338,7 @@ pub fn assemble<R: Readable>(
         today: date_label((now as i64 + local_offset_ms()) as u64),
         rulings_more: rulings.len().saturating_sub(rulings_out.len()),
         rulings: rulings_out,
-        loops_more: loops.len().saturating_sub(loops_out.len()),
-        loops: loops_out,
+
         active,
         days: days_out,
         further,

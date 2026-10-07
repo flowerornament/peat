@@ -114,8 +114,8 @@ pub struct DistStats {
     pub count: i64,
 }
 
-/// The open rows of one lane, newest first: standing rulings, or open
-/// loops. One rule for every reader (the wake, the distiller's register).
+/// The open rows of one lane, newest first: the standing rulings. One
+/// rule for every reader (the wake, the distiller's register).
 pub fn standing<'a>(rows: impl IntoIterator<Item = &'a DistRow>, lane: Lane) -> Vec<&'a DistRow> {
     let mut out: Vec<&DistRow> = rows
         .into_iter()
@@ -218,14 +218,6 @@ pub fn searchable(k: &Keyed<EventId, Envelope>) -> Option<Keyed<EventId, TextRow
         Event::Said { text } => (text, "said", true),
         Event::CompactSummary { text } => (text, "compact", true),
         Event::UserMsg { text } => (text, "user", true),
-        // a closed loop or retired ruling is history, not something to recall
-        Event::Distill {
-            lane,
-            text,
-            open: true,
-            cites,
-            ..
-        } => (text, lane.tag(), !cites.is_empty()),
         _ => return None,
     };
     if text.trim().is_empty() {
@@ -370,8 +362,7 @@ pub fn sess_step(acc: &mut SessStats, e: &Envelope, delta: isize) {
 /// needed (`KeyedStream::new(path, peat_pipeline!())`).
 ///
 /// Reader shape (mirrors the sink tree):
-/// `(days, files, (kw, vec, texts), (subjects, evidence), sessions, ledger,
-/// (distilled, dist_trail))`
+/// `(days, files, (kw, vec, texts), (subjects, evidence), sessions, ledger)`
 #[macro_export]
 macro_rules! peat_pipeline {
     () => {{
@@ -424,14 +415,25 @@ macro_rules! peat_pipeline {
             // iterable table — what makes `asof` replay possible without
             // re-parsing transcripts
             terminal::Table::new("ledger"),
-            // the distiller's lane: digests, rulings, loops — newest per
-            // (lane, key) in the table, every deposit in the trail
-            FilterMap::new(
-                p::dist_row,
-                (
-                    Aggregate::new("dist", p::dist_step, terminal::Table::new("distilled")),
-                    terminal::Multimap::new("dist_trail"),
-                ),
+        )
+    }};
+}
+
+/// The memory sidecar's pipeline (`.peat/memory`): what the distiller
+/// wrote, newest per `(lane, key)` in the table and every deposit in the
+/// trail. A separate store so the ledger never holds a derived event.
+///
+/// Reader shape: `(distilled, dist_trail)`
+#[macro_export]
+macro_rules! memory_pipeline {
+    () => {{
+        use fold::pipeline::{Aggregate, FilterMap, terminal};
+        use $crate::pipeline as p;
+        FilterMap::new(
+            p::dist_row,
+            (
+                Aggregate::new("dist", p::dist_step, terminal::Table::new("distilled")),
+                terminal::Multimap::new("dist_trail"),
             ),
         )
     }};

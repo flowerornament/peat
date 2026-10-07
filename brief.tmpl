@@ -1,22 +1,12 @@
 {{ ("== peat brief · " ~ today ~ " ==") | h1 }}
 {%- if rulings %}
 
-{{ "standing rulings (the user's instructions, newest wins; each cites the message it restates):" | h1 }}
+{{ "standing rulings (the person's instructions, newest wins; each cites the message it restates):" | h1 }}
 {%- for r in rulings %}
   {{ r.subject | accent }}{{ (" (" ~ r.age ~ "):") | dim }} {{ r.text | clip(240) }}{% if r.handle %}  {{ r.handle | dim }}{% endif %}
 {%- endfor %}
 {%- if rulings_more %}
   {{ ("… " ~ rulings_more ~ " older  ▸ peat rulings") | dim }}
-{%- endif %}
-{%- endif %}
-{%- if loops or loops_more %}
-
-{{ "open loops (left unfinished, newest first):" | h1 }}
-{%- for l in loops %}
-  {{ l.key | accent }}{{ (" (" ~ l.age ~ "):") | dim }} {{ l.text | clip(200) }}  {{ l.handle | dim }}
-{%- endfor %}
-{%- if loops_more %}
-  {{ ("… " ~ loops_more ~ " more, older or untouched for 30 days  ▸ peat loops") | dim }}
 {%- endif %}
 {%- endif %}
 {%- if active %}

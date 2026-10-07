@@ -45,6 +45,14 @@ pub fn db_path() -> PathBuf {
     local
 }
 
+/// The memory sidecar beside the ledger (`.peat/memory`): what the
+/// distiller wrote. Losing it loses only model work.
+pub fn memory_path() -> PathBuf {
+    let db = db_path();
+    db.parent()
+        .map_or_else(|| PathBuf::from("memory"), |p| p.join("memory"))
+}
+
 /// The main repository root of a git worktree (`.git` is a file naming
 /// `<main>/.git/worktrees/<name>`) or a secondary jj workspace
 /// (`.jj/repo` is a file naming `<main>/.jj/repo`). `None` for the main
@@ -167,9 +175,29 @@ pub fn open<P>(path: PathBuf, make: impl Fn() -> P) -> Ledger<P>
 where
     P: Push<Keyed<EventId, Envelope>>,
 {
-    let wait_max_ms: u64 = LOCK_WAIT_SECS
-        .get()
-        .copied()
+    open_waiting(path, make, None).expect("open_waiting exits rather than give up")
+}
+
+/// Open a store that is nice to have, not needed (the memory sidecar):
+/// wait at most `wait_secs` for its lock, then give up quietly with
+/// `None` — a reader degrades to "no digests" rather than stalling.
+pub fn try_open<P>(path: PathBuf, make: impl Fn() -> P, wait_secs: u64) -> Option<Ledger<P>>
+where
+    P: Push<Keyed<EventId, Envelope>>,
+{
+    open_waiting(path, make, Some(wait_secs))
+}
+
+fn open_waiting<P>(
+    path: PathBuf,
+    make: impl Fn() -> P,
+    give_up_after: Option<u64>,
+) -> Option<Ledger<P>>
+where
+    P: Push<Keyed<EventId, Envelope>>,
+{
+    let wait_max_ms: u64 = give_up_after
+        .or_else(|| LOCK_WAIT_SECS.get().copied())
         .or_else(|| {
             std::env::var("PEAT_LOCK_WAIT_SECS")
                 .ok()
@@ -177,6 +205,7 @@ where
         })
         .unwrap_or(120u64)
         * 1000;
+    let optional = give_up_after.is_some();
 
     // the data dir ignores itself (cargo's target/ pattern): without this
     // jj snapshots the database into the working commit on the very next
@@ -214,6 +243,10 @@ where
                 }
                 if waited >= wait_max_ms {
                     drop(quiet);
+                    if optional {
+                        phase.done();
+                        return None;
+                    }
                     if let Some(fallback) = LOCK_FAIL_FALLBACK.get() {
                         if !fallback.is_empty() {
                             println!("{fallback}");
@@ -228,7 +261,11 @@ minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
                     ));
                     std::process::exit(75); // EX_TEMPFAIL
                 }
-                if waited == 0 && !ui::fancy_err() && LOCK_FAIL_FALLBACK.get().is_none() {
+                if waited == 0
+                    && !ui::fancy_err()
+                    && LOCK_FAIL_FALLBACK.get().is_none()
+                    && !optional
+                {
                     // non-tty gets one plain line instead of a spinner
                     eprintln!("peat: ledger busy (another peat process); waiting…");
                 }
@@ -244,7 +281,7 @@ minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
         }
     };
     phase.done();
-    Ledger(Some(st))
+    Some(Ledger(Some(st)))
 }
 
 /// How long closing the ledger may take before peat stops waiting for it.
