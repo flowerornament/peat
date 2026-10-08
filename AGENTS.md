@@ -21,19 +21,44 @@ cargo run -- brief
 
 This repo captures its own development: hooks in `.claude/settings.json` brief on start, capture on stop/compact/end, and block once for observations. Deposit obs at commit points; `peat <subject>` reads trails.
 
-## Version Control With jj
+## Version Control
 
-jj-first, colocated. Daily flow:
+This project uses jj, colocated with git. All agents share one commit graph,
+and `main` is the only published bookmark. Each writing agent works in its
+own jj workspace; jj runs with stock configuration and records edits
+continuously, so there is nothing to stage.
 
-```bash
-jj new main -m "task: …"
-# edit; jj records continuously
-jj describe -m "area: what changed (bead-id)"
-just land        # gate → move main → push
-jj new           # step off the landed commit
+```text
+~/code/peat      colocated checkout: .git + .jj, the bd home, the shared
+                 .peat ledger, releases (`just release`). No agent edits code here.
+~/code/peat-1a   jj workspace, coordinator
+~/code/peat-1b   jj workspace, implementer
 ```
 
-Publishing is only through `just land`. Trouble → the `jj-ops` skill; recovery is `jj op log` / `jj undo`, never destructive file ops.
+- Work: `jj new main`, edit, `jj describe -m "area: subject (bead-id)"`.
+  Pick up others' landings with `jj rebase -d main`.
+- Publish: `just land` runs `just check` on exactly the described change,
+  then moves `main` to it and pushes. It refuses undescribed work, a stale
+  parent, and any edit made while the check ran. The implementer lands after
+  the coordinator's GO. A raw `jj git push` skips the gate; never run one.
+- Every description gains `Jj-Workspace:`, `Agent:` and `Session:` trailers
+  from `scripts/jj-identity`, which a SessionStart hook runs. Do not type or
+  strip them.
+- Git runs only in the colocated checkout, and only to read (releases are the
+  exception: `just release` tags and pushes from there). A jj workspace has no
+  `.git`, and `~/.git` exists, so git in a workspace silently answers about
+  the home directory. Never run a mutating git command.
+- Review a frozen commit in one visit, by commit id: `jj new <commit-id>`,
+  then `jj abandon @` and `jj new main` when done. Moving `@` costs a
+  rebuild.
+- Staleness: when another agent rewrites a commit under your `@`, every jj
+  command refuses until `jj workspace update-stale`. Never `jj edit` a change
+  that is an ancestor of another workspace's `@`.
+- Recovery starts at `jj op log`, `jj undo` and `jj op restore`, before any
+  destructive file operation. The `jj-ops` skill holds the jj model.
+
+Completion: `jj describe`, then `just land`; `bd dolt push` if issues
+changed. Work is not complete until `just land` succeeds.
 
 ## Work Tracking
 

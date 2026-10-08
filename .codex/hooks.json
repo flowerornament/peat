@@ -26,6 +26,15 @@
     ],
     "SessionStart": [
       {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(jj workspace root 2>/dev/null || pwd)/scripts/jj-identity\" codex"
+          }
+        ]
+      },
+      {
         "hooks": [
           {
             "command": "bd codex-hook SessionStart",

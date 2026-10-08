@@ -6,3 +6,12 @@ target/
 .beads-credential-key
 .beads/proxieddb/
 scripts/__pycache__/
+
+# jj and agent scratch: only the shared configs and the shipped skill are tracked
+.jj/
+.claude/*
+!.claude/settings.json
+!.claude/skills/
+.codex/*
+!.codex/config.toml
+!.codex/hooks.json

@@ -22,9 +22,18 @@
     ],
     "SessionStart": [
       {
+        "matcher": "",
         "hooks": [
           {
-            "command": "in=$(cat); mkdir -p .peat; printf '%s' \"$in\" | jq -r '.session_id' > .peat/current-session 2>/dev/null; PEAT_LOCK_WAIT_SECS=15 peat brief 2>/dev/null || true; src=$(printf '%s' \"$in\" | jq -r '.source // empty'); if [ \"$src\" = \"compact\" ]; then echo \"\"; echo \"peat: context was just compacted \u2014 if durable knowledge from before the compaction is not yet deposited, do it now from the summary: peat obs <subject> \\\"<one-line claim>\\\"\"; fi; exit 0",
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/scripts/jj-identity\" claude-code"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "in=$(cat); mkdir -p .peat; printf '%s' \"$in\" | jq -r '.session_id' > .peat/current-session 2>/dev/null; PEAT_LOCK_WAIT_SECS=15 peat brief 2>/dev/null || true; src=$(printf '%s' \"$in\" | jq -r '.source // empty'); if [ \"$src\" = \"compact\" ]; then echo \"\"; echo \"peat: context was just compacted — if durable knowledge from before the compaction is not yet deposited, do it now from the summary: peat obs <subject> \\\"<one-line claim>\\\"\"; fi; exit 0",
             "type": "command"
           }
         ]
@@ -65,7 +74,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); cmd=$(printf '%s' \"$in\" | jq -r '.tool_input.command // empty'); case \"$cmd\" in *'git commit'*|*'jj describe'*|*'just land'*) printf '{\"additionalContext\":\"a commit landed \u2014 deposit peat obs <subject> \\\\\"<one-line claim>\\\\\" for anything durable learned this change\"}' ;; esac; exit 0"
+            "command": "in=$(cat); cmd=$(printf '%s' \"$in\" | jq -r '.tool_input.command // empty'); case \"$cmd\" in *'git commit'*|*'jj describe'*|*'just land'*) printf '{\"additionalContext\":\"a commit landed — deposit peat obs <subject> \\\\\"<one-line claim>\\\\\" for anything durable learned this change\"}' ;; esac; exit 0"
           }
         ]
       }
