@@ -4,7 +4,7 @@ All notable changes to peat. The ledger is the API to our past; so is this file.
 
 Entries prefixed **Hooks:** touch the hook contract. Since 0.4.0 every hook is the constant command `peat hook` and its behaviour ships with the binary, so an upgrade needs no re-sync; before that, hooks were copied bash snippets stamped `hooks snippet vN` and had to be re-copied by hand.
 
-## Unreleased
+## 0.5.0 — 2026-10-18
 
 peat is now the record of what agents did, answerable from whatever an agent is already looking at; it no longer writes a reading of the past into agent context. Reasoning and evidence: `.design/2026-10-19-peat-is-the-record.md`.
 
