@@ -22,17 +22,35 @@
           }
         ],
         "matcher": "manual|auto"
+      },
+      {
+        "hooks": [
+          {
+            "command": "peat hook",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "peat hook",
+            "type": "command"
+          }
+        ]
       }
     ],
     "SessionStart": [
       {
-        "matcher": "",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash \"$(jj workspace root 2>/dev/null || pwd)/scripts/jj-identity\" codex"
+            "command": "bash \"$(jj workspace root 2>/dev/null || pwd)/scripts/jj-identity\" codex",
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": ""
       },
       {
         "hooks": [
@@ -43,6 +61,24 @@
           }
         ],
         "matcher": "startup|resume|clear"
+      },
+      {
+        "hooks": [
+          {
+            "command": "peat hook",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "peat hook",
+            "type": "command"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -51,6 +87,14 @@
           {
             "command": "bd codex-hook UserPromptSubmit",
             "statusMessage": "Refreshing Beads context",
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "peat hook",
             "type": "command"
           }
         ]

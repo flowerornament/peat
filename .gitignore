@@ -15,3 +15,7 @@ scripts/__pycache__/
 .codex/*
 !.codex/config.toml
 !.codex/hooks.json
+
+# nix build output and bd runtime log
+/result
+.beads/interactions.jsonl
