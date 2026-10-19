@@ -1,8 +1,8 @@
 //! `peat hook` — the one command every harness hook runs.
 //!
 //! Claude Code and Codex hand each hook a JSON object on stdin that names
-//! its own moment (`hook_event_name`), so a single verb can serve all six
-//! moments: the harness config says `peat hook` and nothing else, and the
+//! its own moment (`hook_event_name`), so a single verb serves every
+//! moment: the harness config says `peat hook` and nothing else, and the
 //! logic that used to live in copied bash (jq extraction, once-per-session
 //! markers, `nohup` detachment, `PEAT_DB` anchors, `READY` gates) lives
 //! here, versioned with the binary. Upgrading peat upgrades the hooks.
@@ -47,14 +47,11 @@ impl Fabric {
     }
 }
 
-/// The six moments peat covers, in the harness's spelling.
-pub const EVENTS: [&str; 5] = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "Stop",
-    "PreCompact",
-    "SessionEnd",
-];
+/// The moments peat covers, in the harness's spelling: brief at the
+/// start, capture at every way a stretch of work can end. Events peat used
+/// to wire (UserPromptSubmit for push, PostToolUse for the commit nudge)
+/// are retired; `install` removes peat from them.
+pub const EVENTS: [&str; 4] = ["SessionStart", "Stop", "PreCompact", "SessionEnd"];
 
 /// The fields of the stdin object peat reads. Everything optional: a
 /// harness that omits a field gets the no-op branch, not a crash.
@@ -64,8 +61,6 @@ pub struct Input {
     pub session_id: Option<String>,
     pub transcript_path: Option<String>,
     pub last_assistant_message: Option<String>,
-    /// UserPromptSubmit: what the user just typed.
-    pub prompt: Option<String>,
 }
 
 impl Input {
@@ -77,7 +72,6 @@ impl Input {
             session_id: s("session_id").filter(|x| !x.is_empty()),
             transcript_path: s("transcript_path").filter(|x| !x.is_empty()),
             last_assistant_message: s("last_assistant_message").filter(|x| !x.trim().is_empty()),
-            prompt: s("prompt").filter(|x| !x.trim().is_empty()),
         }
     }
 }
@@ -86,13 +80,11 @@ impl Input {
 /// and a few filesystem facts, so it is testable without a harness.
 #[derive(Debug, PartialEq)]
 pub enum Action {
-    /// Nothing to do (unknown event, missing field, push not opted in).
+    /// Nothing to do (unknown or retired event, missing field).
     Nothing,
-    /// Print the brief.
+    /// Print the agent brief. Needs the open ledger, so it is handed back
+    /// to `main`.
     Brief,
-    /// Search memory for this prompt and inject what both lanes agree on.
-    /// Needs the open ledger, so it is handed back to `main` like the brief.
-    Push { session: String, prompt: String },
     /// Detach a capture of this transcript with this closing message.
     Capture {
         transcript: PathBuf,
@@ -100,24 +92,12 @@ pub enum Action {
     },
 }
 
-/// Decide the action. `push` answers "has this ledger opted in to
-/// prompt-time push?" and is passed in so the decision stays pure.
-///
-/// peat no longer asks agents to write observations (the nudges at the
-/// first prompt, after commits and after compaction are gone): agents
-/// wrote them rarely and mostly as status, and the distiller now writes
-/// memory from what the harness already records. See
-/// `.design/2026-10-07-distill-reads-the-harness.md`.
-pub fn plan(input: &Input, push: bool) -> Action {
+/// Decide the action. Pure — the input alone decides, so it is testable
+/// without a harness. peat asks nothing of the agent: no deposit nudges,
+/// no prompt-time push (see `.design/2026-10-19-peat-is-the-record.md`).
+pub fn plan(input: &Input) -> Action {
     match input.event.as_str() {
         "SessionStart" => Action::Brief,
-        "UserPromptSubmit" => match push_for(input, push) {
-            Some((sid, prompt)) => Action::Push {
-                session: sid.to_string(),
-                prompt: prompt.to_string(),
-            },
-            None => Action::Nothing,
-        },
         "Stop" | "PreCompact" | "SessionEnd" => {
             let transcript = input
                 .transcript_path
@@ -180,33 +160,6 @@ pub fn enabled() -> bool {
     !(off(Some(&db::peat_dir())) || off(db.parent()))
 }
 
-/// Is prompt-time push switched on for this ledger? Opt-in, like the
-/// distiller: a file named `push` beside the database. It changes what
-/// every agent on the ledger sees, so an upgrade must not start it.
-fn push_enabled() -> bool {
-    db::db_path()
-        .parent()
-        .is_some_and(|d| d.join("push").exists())
-}
-
-/// A prompt worth searching memory for: the user's own words, with
-/// enough of them to mean something. Slash commands and harness
-/// wrappers are not questions.
-fn pushable(prompt: &str) -> bool {
-    let p = prompt.trim();
-    p.len() >= 24 && !p.starts_with('/') && !p.starts_with('<') && !p.starts_with("[hail ")
-}
-
-/// The session and prompt to push memory for, if this is a prompt worth
-/// it on a ledger that opted in. Pure, so the decision is testable.
-fn push_for(input: &Input, enabled: bool) -> Option<(&str, &str)> {
-    if input.event != "UserPromptSubmit" || !enabled {
-        return None;
-    }
-    let (sid, prompt) = (input.session_id.as_deref()?, input.prompt.as_deref()?);
-    pushable(prompt).then_some((sid, prompt))
-}
-
 /// Spawn `peat <args>` in its own process group with all stdio closed,
 /// so the hook returns in milliseconds and a harness deadline (or
 /// teardown) cannot cancel the work.
@@ -234,12 +187,10 @@ pub fn run(event_override: Option<String>) -> Action {
     if let Some(e) = event_override {
         input.event = e;
     }
-    // a distiller's model command may itself be a harness with hooks:
-    // its session must never be briefed, captured, or distilled in turn
-    if !enabled() || std::env::var_os(crate::distill::GUARD_ENV).is_some() {
+    if !enabled() {
         return Action::Nothing;
     }
-    let action = plan(&input, push_enabled());
+    let action = plan(&input);
     match &action {
         Action::Brief => {
             if let Some(sid) = &input.session_id {
@@ -247,34 +198,14 @@ pub fn run(event_override: Option<String>) -> Action {
                 let _ = std::fs::create_dir_all(&dir);
                 let _ = std::fs::write(dir.join("current-session"), sid);
             }
-            // the sweep: distill whatever went quiet since the last
-            // session started. Detached, and a no-op where this ledger
-            // paused it (`peat distill --sweep` checks `.peat/distill-off`).
-            detach(
-                &["distill", "--sweep", "--since", "14", "--limit", "12"].map(std::ffi::OsStr::new),
-            );
         }
         Action::Capture {
             transcript,
             final_msg,
-            // a turn ending is not a stretch ending; the two moments that
-            // close one (context replaced, session over) distill it
         } => detach_capture(transcript, final_msg.as_deref()),
-        Action::Nothing | Action::Push { .. } => {}
+        Action::Nothing => {}
     }
     action
-}
-
-/// The `additionalContext` envelope. Nested under `hookSpecificOutput`
-/// with the event name: the shape Codex requires and Claude Code accepts.
-pub fn nudge_json(event: &str, text: &str) -> String {
-    serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": event,
-            "additionalContext": text,
-        }
-    })
-    .to_string()
 }
 
 /// Detach `peat capture`. Arguments travel as argv — the closing
@@ -288,6 +219,42 @@ fn detach_capture(transcript: &Path, final_msg: Option<&str>) {
 }
 
 // ---- install ---------------------------------------------------------
+
+/// `peat hook install`: wire the hooks and lay the skill at the desk root
+/// (the directory holding `.peat`). Creates the ledger when the desk has
+/// none, because `peat hook` is a no-op without one.
+pub fn install_cli(fabric: Fabric, check: bool, print: bool) {
+    if print {
+        println!("{}", serde_json::to_string_pretty(&snippet()).unwrap());
+        return;
+    }
+    let root = db::peat_dir()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap());
+    if !check {
+        drop(db::open_db(db::db_path()));
+    }
+    let skill = install_skill(&root, fabric, check);
+    match install(&root, fabric, check).and_then(|h| skill.map(|s| (h, s))) {
+        Ok((line, skill_line)) => {
+            println!("{line}");
+            println!("{skill_line}");
+            if !check {
+                println!("  {} hook on: {}", fabric.name(), EVENTS.join(", "));
+                if fabric == Fabric::Codex {
+                    println!(
+                        "  Codex runs no hook until it is trusted: open /hooks in the Codex CLI and trust it"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            crate::ui::error(&e);
+            std::process::exit(1);
+        }
+    }
+}
 
 /// The peat skill: the judgment half (when to read, how to deposit, how
 /// far to trust a line), shipped inside the binary so `install` can lay
@@ -539,53 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn push_needs_the_opt_in_a_prompt_and_a_session() {
-        let raw = r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"why does the land gate fail on clippy?"}"#;
-        let i = Input::parse(raw);
-        assert_eq!(
-            push_for(&i, true),
-            Some(("s1", "why does the land gate fail on clippy?"))
-        );
-        assert_eq!(push_for(&i, false), None, "not opted in");
-        let no_sid = Input {
-            session_id: None,
-            ..Input::parse(raw)
-        };
-        assert_eq!(push_for(&no_sid, true), None);
-        let other = Input {
-            event: "Stop".into(),
-            ..Input::parse(raw)
-        };
-        assert_eq!(push_for(&other, true), None);
-        let short = Input {
-            prompt: Some("ok go".into()),
-            ..Input::parse(raw)
-        };
-        assert_eq!(push_for(&short, true), None);
-    }
-
-    #[test]
-    fn only_a_real_question_is_worth_searching_memory_for() {
-        let raw = r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"why does the land gate fail on clippy?"}"#;
-        assert!(pushable(Input::parse(raw).prompt.as_deref().unwrap()));
-        for p in [
-            "/model",
-            "ok do it",
-            "<command-name>/clear</command-name> and more words here",
-            "[hail ask from:a to:b] a relayed message from a peer",
-        ] {
-            assert!(!pushable(p), "{p}");
-        }
-    }
-
-    #[test]
-    fn session_start_briefs_and_prompts_push_only_when_opted_in() {
-        assert_eq!(plan(&input("SessionStart"), false), Action::Brief);
-        let mut i = input("UserPromptSubmit");
-        i.prompt = Some("why does the land gate fail on clippy?".into());
-        assert_eq!(plan(&i, false), Action::Nothing, "no nudge, no push");
-        assert!(matches!(plan(&i, true), Action::Push { .. }));
-        assert_eq!(plan(&input("PostToolUse"), true), Action::Nothing);
+    fn session_start_briefs_and_retired_events_do_nothing() {
+        assert_eq!(plan(&input("SessionStart")), Action::Brief);
+        assert_eq!(plan(&input("UserPromptSubmit")), Action::Nothing);
+        assert_eq!(plan(&input("PostToolUse")), Action::Nothing);
     }
 
     #[test]
@@ -593,7 +517,7 @@ mod tests {
         let mut i = input("Stop");
         i.last_assistant_message = Some("done: `x` $HOME \"q\"".into());
         assert_eq!(
-            plan(&i, false),
+            plan(&i),
             Action::Capture {
                 transcript: "/t/abc123.jsonl".into(),
                 final_msg: Some("done: `x` $HOME \"q\"".into())
@@ -601,7 +525,7 @@ mod tests {
         );
         i.event = "PreCompact".into();
         assert_eq!(
-            plan(&i, false),
+            plan(&i),
             Action::Capture {
                 transcript: "/t/abc123.jsonl".into(),
                 final_msg: None
@@ -609,16 +533,8 @@ mod tests {
         );
         i.transcript_path = None;
         i.session_id = Some("no-such-session-anywhere".into());
-        assert_eq!(plan(&i, false), Action::Nothing);
-        assert_eq!(plan(&input("Whatever"), false), Action::Nothing);
-    }
-
-    #[test]
-    fn nudge_json_is_the_nested_shape() {
-        let v: serde_json::Value =
-            serde_json::from_str(&nudge_json("UserPromptSubmit", "hi")).unwrap();
-        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
-        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "hi");
+        assert_eq!(plan(&i), Action::Nothing);
+        assert_eq!(plan(&input("Whatever")), Action::Nothing);
     }
 
     #[test]

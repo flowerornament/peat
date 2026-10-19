@@ -239,3 +239,16 @@ pub fn page(text: &str) {
     }
     print!("{text}");
 }
+
+/// The command that reads a subject's full trail: bare `peat <name>` when
+/// the name is one shell-safe token, the explicit flag form otherwise.
+pub fn subject_handle(name: &str) -> String {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
+        format!("▸ peat {name}")
+    } else {
+        format!("▸ peat recall --subject {name:?}")
+    }
+}

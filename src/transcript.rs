@@ -272,13 +272,6 @@ pub fn parse_from(jsonl: &str, fallback_session: Option<&str>, skip: usize) -> O
                                     Envelope::new(&session, ts, Event::FileTouch { path }),
                                 ));
                             }
-                            // best-effort commit detection from git commit commands
-                            if let Some((hash, message)) = commit_of(tool, input, line) {
-                                events.push((
-                                    (session.clone(), seq0 + SEQ_STRIDE - 2),
-                                    Envelope::new(&session, ts, Event::Commit { hash, message }),
-                                ));
-                            }
                         }
                         Some("tool_result") => {
                             let err = block.get("is_error").and_then(Value::as_bool) == Some(true)
@@ -344,51 +337,6 @@ fn file_touch(tool: &str, input: &Value) -> Option<String> {
     matches!(tool, "Edit" | "Write" | "NotebookEdit")
         .then(|| input.get("file_path")?.as_str().map(String::from))
         .flatten()
-}
-
-/// The `-m "..."` message of a commit-like command, if it is one.
-fn commit_msg_from_cmd(cmd: &str) -> Option<String> {
-    if !cmd.contains("git commit") && !cmd.contains("jj describe") {
-        return None;
-    }
-    Some(
-        cmd.split_once("-m")
-            .map(|(_, rest)| {
-                let rest = rest.trim_start();
-                let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'');
-                match quote {
-                    Some(q) => rest[1..].split(q).next().unwrap_or("").to_string(),
-                    None => rest.split_whitespace().next().unwrap_or("").to_string(),
-                }
-            })
-            .unwrap_or_default(),
-    )
-}
-
-/// `git commit` in a Bash command -> (hash, message). Hash is best-effort
-/// (empty when unparseable); the message comes from `-m "..."`.
-fn commit_of(tool: &str, input: &Value, line: &Value) -> Option<(String, String)> {
-    if tool != "Bash" {
-        return None;
-    }
-    let cmd = input.get("command")?.as_str()?;
-    let message = commit_msg_from_cmd(cmd)?;
-    // stdout like "[main abc1234] msg" if the result rode along on this line
-    let hash = line
-        .get("toolUseResult")
-        .and_then(|r| r.get("stdout"))
-        .and_then(Value::as_str)
-        .and_then(|out| {
-            let i = out.find('[')?;
-            out[i..].split_whitespace().nth(1).map(|h| {
-                h.trim_end_matches(']')
-                    .chars()
-                    .filter(char::is_ascii_alphanumeric)
-                    .collect::<String>()
-            })
-        })
-        .unwrap_or_default();
-    Some((hash, cap(&message, 200)))
 }
 
 /// Replace any parsed `FinalMsg` with the hook-provided closing message
@@ -636,10 +584,7 @@ fn parse_codex(
                                 .and_then(Value::as_str)
                                 .map(String::from)
                         });
-                    let detail = cmd
-                        .clone()
-                        .or_else(|| args.map(String::from))
-                        .unwrap_or_default();
+                    let detail = cmd.or_else(|| args.map(String::from)).unwrap_or_default();
                     events.push((
                         (session.clone(), seq),
                         Envelope::new(
@@ -652,19 +597,6 @@ fn parse_codex(
                             },
                         ),
                     ));
-                    if let Some(message) = cmd.as_deref().and_then(commit_msg_from_cmd) {
-                        events.push((
-                            (session.clone(), seq + 1),
-                            Envelope::new(
-                                &session,
-                                ts,
-                                Event::Commit {
-                                    hash: String::new(),
-                                    message: cap(&message, 200),
-                                },
-                            ),
-                        ));
-                    }
                 }
                 _ => {} // reasoning, outputs, agent_message: skipped
             },

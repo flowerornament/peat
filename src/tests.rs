@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use fold::stream::KeyedStream;
 
-use crate::event::{DISTILL_SEQ_BASE, Envelope, Event, EventId, Lane, OBS_SEQ_BASE};
+use crate::event::{Envelope, Event, EventId, OBS_SEQ_BASE};
 use crate::pipeline::{DAY_MS, DayStats, SubjStats};
 
 fn tmp() -> std::path::PathBuf {
@@ -25,12 +25,11 @@ fn tmp() -> std::path::PathBuf {
     dir
 }
 
-// The pipeline type contains closures and cannot be named, so opening a
-// stream is a macro expanded where the concrete type is needed.
-macro_rules! open {
-    ($path:expr) => {
-        KeyedStream::<EventId, Envelope, _>::new($path, crate::peat_pipeline!())
-    };
+/// A bare stream over peat's pipeline (no lock wait, no watchdog).
+fn open(
+    path: impl Into<std::path::PathBuf>,
+) -> KeyedStream<EventId, Envelope, crate::pipeline::Pipeline> {
+    KeyedStream::new(path.into(), crate::pipeline::pipeline())
 }
 
 fn obs(session: &str, n: u32, ts: u64, subject: &str, text: &str) -> (EventId, Envelope) {
@@ -94,7 +93,7 @@ macro_rules! nearest {
 #[test]
 fn retraction_makes_old_text_unfindable() {
     let path = tmp();
-    let mut st = open!(&path);
+    let mut st = open(&path);
     let id = ("s1".to_string(), OBS_SEQ_BASE);
     let control = ("s1".to_string(), OBS_SEQ_BASE + 1);
 
@@ -140,7 +139,7 @@ fn retraction_makes_old_text_unfindable() {
 
     // and the property must survive a reopen (hnsw rebuild path)
     drop(st);
-    let st = open!(&path);
+    let st = open(&path);
     assert!(!find_kw!(st, "raspberry").contains(&id));
     assert_eq!(nearest!(st, "raspberry pi under a desk"), Some(control));
     assert_eq!(nearest!(st, "moved to a cloud vm"), Some(id));
@@ -154,7 +153,7 @@ fn retraction_makes_old_text_unfindable() {
 #[ignore = "red-capability proof: must FAIL when run explicitly"]
 fn retraction_oracle_is_red_capable() {
     let path = tmp();
-    let mut st = open!(&path);
+    let mut st = open(&path);
     let id = ("s1".to_string(), OBS_SEQ_BASE);
     st.wtx(|tx| {
         tx.upsert(
@@ -232,7 +231,7 @@ fn replay_prefix_matches_independent_prediction() {
     let ev = ledger();
     for cut in [0, 1, 7, 24, ev.len()] {
         let prefix = &ev[..cut];
-        let mut st = open!(tmp());
+        let mut st = open(tmp());
         st.wtx(|tx| {
             for (id, e) in prefix {
                 tx.upsert(id, e);
@@ -262,14 +261,14 @@ fn replay_prefix_matches_independent_prediction() {
 fn batching_is_unobservable() {
     let ev = ledger();
 
-    let mut one = open!(tmp());
+    let mut one = open(tmp());
     one.wtx(|tx| {
         for (id, e) in &ev {
             tx.upsert(id, e);
         }
     });
 
-    let mut many = open!(tmp());
+    let mut many = open(tmp());
     for (id, e) in &ev {
         many.wtx(|tx| {
             tx.upsert(id, e);
@@ -303,7 +302,7 @@ fn batching_is_unobservable() {
 fn equal_timestamp_obs_resolve_by_seq() {
     for _ in 0..8 {
         // repeated runs guard against hash-order flakiness going unseen
-        let mut st = open!(tmp());
+        let mut st = open(tmp());
         st.wtx(|tx| {
             tx.upsert(
                 &("s1".to_string(), OBS_SEQ_BASE),
@@ -328,7 +327,7 @@ fn equal_timestamp_obs_resolve_by_seq() {
 /// revision does not exist there.
 #[test]
 fn prefix_fold_reconstructs_past_beliefs() {
-    let full = open!(tmp());
+    let full = open(tmp());
     let mut full = full;
     full.wtx(|tx| {
         tx.upsert(
@@ -349,7 +348,7 @@ fn prefix_fold_reconstructs_past_beliefs() {
             .collect()
     });
     assert_eq!(prefix.len(), 1);
-    let mut past = open!(tmp());
+    let mut past = open(tmp());
     past.wtx(|tx| {
         for (id, e) in &prefix {
             tx.upsert(id, e);
@@ -395,7 +394,7 @@ fn capture_fixture_parses_and_is_idempotent() {
     assert_eq!(ids.len(), parsed.events.len(), "duplicate event ids");
 
     // capturing twice must equal capturing once
-    let mut st = open!(tmp());
+    let mut st = open(tmp());
     st.wtx(|tx| {
         for (id, e) in &parsed.events {
             tx.upsert(id, e);
@@ -472,8 +471,8 @@ fn codex_rollout_parses_and_unknown_rejected() {
     assert_eq!(count(|e| matches!(e, Event::ToolCall { .. })), 1);
     assert_eq!(
         count(|e| matches!(e, Event::Commit { .. })),
-        1,
-        "jj describe detected"
+        0,
+        "commits are not guessed from command text (0.5.0)"
     );
     assert_eq!(count(|e| matches!(e, Event::Compaction {})), 1);
     assert_eq!(count(|e| matches!(e, Event::CompactSummary { .. })), 1);
@@ -555,7 +554,7 @@ fn obs2(
 #[test]
 fn anchored_and_legacy_obs_coexist() {
     let dir = tmp();
-    let mut st = open!(&dir);
+    let mut st = open(&dir);
     let basis = crate::event::Basis {
         commit: "abcdef0123456789".into(),
         dirty: true,
@@ -634,7 +633,7 @@ fn view_rebuild_replays_the_ledger() {
         ),
     ];
     {
-        let mut st = open!(&dir);
+        let mut st = open(&dir);
         st.wtx(|tx| {
             for (id, e) in &events {
                 tx.upsert(id, e);
@@ -643,12 +642,12 @@ fn view_rebuild_replays_the_ledger() {
         st.checkpoint();
     }
     // simulate a db written under the previous view schema
-    let marker = crate::beside(&dir, ".view-version");
+    let marker = crate::db::beside(&dir, ".view-version");
     std::fs::write(&marker, "1\n").unwrap();
-    crate::migrate_views(&dir);
+    crate::db::migrate_views(&dir);
     assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "2");
-    assert!(crate::beside(&dir, ".old").exists(), "previous db kept");
-    let st = open!(&dir);
+    assert!(crate::db::beside(&dir, ".old").exists(), "previous db kept");
+    let st = open(&dir);
     let (head, ledger_len) = st.rtx(|(_, _, _, (subjects, _), _, ledger)| {
         (
             subjects.get(&"subj".to_string()) as Option<SubjStats>,
@@ -671,19 +670,19 @@ fn view_rebuild_replays_the_ledger() {
 #[test]
 fn small_captures_do_not_checkpoint() {
     // the per-turn case: a handful of events, a fresh journal
-    assert!(!crate::should_checkpoint(3, 0));
-    assert!(!crate::should_checkpoint(12, 5 << 20));
-    assert!(!crate::should_checkpoint(499, 47 << 20));
+    assert!(!crate::db::should_checkpoint(3, 0));
+    assert!(!crate::db::should_checkpoint(12, 5 << 20));
+    assert!(!crate::db::should_checkpoint(499, 47 << 20));
 }
 
 #[test]
 fn bulk_or_grown_journal_checkpoints() {
     // bulk backfill: worth folding immediately
-    assert!(crate::should_checkpoint(500, 0));
-    assert!(crate::should_checkpoint(50_000, 0));
+    assert!(crate::db::should_checkpoint(500, 0));
+    assert!(crate::db::should_checkpoint(50_000, 0));
     // small delta, but the journal would dominate the next open
-    assert!(crate::should_checkpoint(1, 48 << 20));
-    assert!(crate::should_checkpoint(0, 200 << 20));
+    assert!(crate::db::should_checkpoint(1, 48 << 20));
+    assert!(crate::db::should_checkpoint(0, 200 << 20));
 }
 
 #[test]
@@ -694,9 +693,9 @@ fn journal_bytes_sums_only_jnl_files() {
     std::fs::write(dir.join("4.jnl"), vec![0u8; 1024]).unwrap();
     std::fs::write(dir.join("lock"), vec![0u8; 4096]).unwrap();
     std::fs::create_dir_all(dir.join("keyspaces")).unwrap();
-    assert_eq!(crate::journal_bytes(&dir), 3072);
+    assert_eq!(crate::db::journal_bytes(&dir), 3072);
     // a missing directory is not an error — capture must never be fatal
-    assert_eq!(crate::journal_bytes(&dir.join("nope")), 0);
+    assert_eq!(crate::db::journal_bytes(&dir.join("nope")), 0);
 }
 
 // ------------------------------------------------------- vector lane (Flat)
@@ -709,7 +708,7 @@ fn journal_bytes_sums_only_jnl_files() {
 fn vector_lane_is_deterministic_across_opens() {
     let dir = tmp();
     let first = {
-        let mut st = open!(&dir);
+        let mut st = open(&dir);
         st.wtx(|tx| {
             for (n, text) in [
                 "the retraction oracle must be red-capable",
@@ -734,7 +733,7 @@ fn vector_lane_is_deterministic_across_opens() {
         })
     };
     let second = {
-        let st = open!(&dir);
+        let st = open(&dir);
         st.rtx(|(_, _, (_, vec, _), _, _, _)| {
             vec.search(&ese::encode_single("hooks that fail silently"))
                 .into_iter()
@@ -781,241 +780,4 @@ fn last_session_prefers_this_desk_on_a_shared_ledger() {
         crate::brief::last_session(&[], std::path::Path::new("/x")).map(|_| ()),
         None
     );
-}
-
-// ---------------------------------------------------------------- memory
-
-fn distilled(
-    session: &str,
-    n: u32,
-    ts: u64,
-    lane: Lane,
-    key: &str,
-    text: &str,
-    open: bool,
-) -> (EventId, Envelope) {
-    (
-        (session.to_string(), DISTILL_SEQ_BASE + n),
-        Envelope::memory(
-            session,
-            ts,
-            Event::Distill {
-                lane,
-                key: key.to_string(),
-                text: text.to_string(),
-                open,
-                cites: vec![(session.to_string(), 16)],
-                src: 7,
-                by: "test".into(),
-            },
-        ),
-    )
-}
-
-/// The memory sidecar: a revised ruling replaces the old one in the
-/// register whatever the write order, and the trail keeps both.
-#[test]
-fn a_newer_deposit_supersedes_and_the_trail_keeps_both() {
-    let mut st = KeyedStream::<EventId, Envelope, _>::new(tmp(), crate::memory_pipeline!());
-    let old = distilled("s1", 0, 1000, Lane::Ruling, "land", "push by hand", true);
-    let new = distilled(
-        "s2",
-        0,
-        2000,
-        Lane::Ruling,
-        "land",
-        "always use just land",
-        true,
-    );
-    let day = distilled(
-        "peat-distill",
-        0,
-        2000,
-        Lane::Digest,
-        "2024-10-04",
-        "a day",
-        true,
-    );
-    st.wtx(|tx| {
-        for (id, e) in [&new, &old, &day] {
-            tx.upsert(id, e);
-        }
-    });
-    let key = crate::pipeline::dist_key(Lane::Ruling, "land");
-    let (head, trail, digest) = st.rtx(|(dist, trail)| {
-        let head: crate::pipeline::DistStats = dist.get(&key).unwrap();
-        let trail: Vec<crate::pipeline::DistRow> = trail.get(&key);
-        let digest: Option<crate::pipeline::DistStats> =
-            dist.get(&crate::pipeline::dist_key(Lane::Digest, "2024-10-04"));
-        (head, trail, digest)
-    });
-    assert_eq!(head.row.unwrap().text, "always use just land");
-    assert_eq!((head.count, trail.len()), (2, 2));
-    assert!(digest.is_some(), "a digest and a ruling are separate keys");
-}
-
-/// The ledger never holds a distilled event: everything the distiller
-/// writes goes to the sidecar, so an older peat can always read the
-/// ledger. Pinned here so a refactor cannot route one back.
-#[test]
-fn the_ledger_pipeline_ignores_distilled_events() {
-    let mut st = open!(tmp());
-    let d = distilled("s1", 0, 1000, Lane::Ruling, "land", "zebrafish rule", true);
-    st.wtx(|tx| tx.upsert(&d.0, &d.1));
-    assert!(
-        find_kw!(st, "zebrafish").is_empty(),
-        "not searchable from the ledger"
-    );
-    assert_eq!(
-        crate::event::EVENT_VERSION,
-        3,
-        "the ledger's schema did not move"
-    );
-}
-
-/// The wake leads with what holds (rulings) and says the past in words
-/// where a digest exists, counts where it does not.
-#[test]
-fn the_wake_leads_with_rulings_and_words_its_bands() {
-    let day = 20_000u64; // 2024-10-04
-    let ts = day * DAY_MS + 1000;
-    let mut st = open!(tmp());
-    let rows = [
-        tool("s1", 1, ts, true),
-        tool("s1", 2, ts - DAY_MS, true),
-        tool("s1", 3, ts - 2 * DAY_MS, true),
-        tool("s1", 4, ts - 40 * DAY_MS, true),
-    ];
-    st.wtx(|tx| {
-        for (id, e) in &rows {
-            tx.upsert(id, e);
-        }
-    });
-    let mem = |(id, e): (EventId, Envelope)| {
-        crate::pipeline::dist_row(&fold::pipeline::Keyed::new(id, e))
-            .unwrap()
-            .val
-    };
-    let dist: Vec<crate::pipeline::DistRow> = [
-        distilled(
-            "s1",
-            0,
-            ts,
-            Lane::Ruling,
-            "land",
-            "always use just land",
-            true,
-        ),
-        distilled("s1", 1, ts, Lane::Ruling, "old", "withdrawn", false),
-        distilled(
-            "d",
-            0,
-            ts,
-            Lane::Digest,
-            "2024-10-04",
-            "Fixed the gate.",
-            true,
-        ),
-        distilled(
-            "d",
-            1,
-            ts,
-            Lane::Digest,
-            "2024-08",
-            "Built the ladder.",
-            true,
-        ),
-    ]
-    .into_iter()
-    .map(mem)
-    .collect();
-    let brief = make_brief!(st, "", ts + DAY_MS, 8, &dist);
-    let v = serde_json::to_value(&brief).unwrap();
-    assert_eq!(
-        v["rulings"].as_array().unwrap().len(),
-        1,
-        "withdrawn rulings do not stand"
-    );
-    assert_eq!(
-        v["rulings"][0]["handle"], "▸ peat s1 16",
-        "the citation is the way in"
-    );
-    assert_eq!(v["days"][0]["digest"], "Fixed the gate.");
-    let band = v["further"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|b| b["handle"] == "peat 2024-08");
-    assert_eq!(
-        band.unwrap_or_else(|| panic!("{}", v["further"]))["digest"],
-        "Built the ladder."
-    );
-    let text = crate::brief::render(&brief);
-    let (r, d) = (
-        text.find("standing rulings").unwrap(),
-        text.find("recent activity").unwrap(),
-    );
-    assert!(r < d, "what holds comes before what happened:\n{text}");
-    assert!(text.contains("Fixed the gate.") && text.contains("Built the ladder."));
-}
-
-/// Push needs both lanes to agree, skips the asking session's own text,
-/// and never repeats a line.
-#[test]
-fn push_takes_agreement_from_other_sessions_once() {
-    let mut st = open!(tmp());
-    let hit = obs(
-        "s1",
-        0,
-        1000,
-        "land",
-        "always land through just land never push by hand",
-    );
-    let own = obs(
-        "me",
-        0,
-        1000,
-        "land2",
-        "land through just land is still failing",
-    );
-    // shares no word with the prompt: only the vector lane can find it,
-    // and with a small corpus the vector lane returns everything
-    let far = obs("s9", 0, 1000, "zoo", "okapi giraffe zebra habitats");
-    st.wtx(|tx| {
-        for (id, e) in [&hit, &own, &far] {
-            tx.upsert(id, e);
-        }
-    });
-    let q = "how should I land this change, push by hand?";
-    let push = |seen: &std::collections::HashSet<EventId>| {
-        st.rtx(|(_, _, (kw, vec, texts), _, _, _)| {
-            crate::brief::push_hits(
-                q,
-                "me",
-                |q, n| kw.search(q, n),
-                |v| vec.search(v),
-                |id| texts.get(id),
-                seen,
-                3,
-            )
-        })
-    };
-    let got = push(&Default::default());
-    assert_eq!(
-        got.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
-        vec![hit.0.clone()],
-        "one lane is not agreement, and the asker's own text is skipped"
-    );
-    let line = crate::brief::push_text(&got, 1000 + DAY_MS);
-    assert!(line.contains("[obs · 1d]"), "{line}");
-    assert!(push(&[hit.0.clone()].into_iter().collect()).is_empty());
-    let lanes = st.rtx(|(_, _, (kw, vec, _), _, _, _)| {
-        (
-            kw.search(q, 12).iter().any(|h| h.val == far.0),
-            vec.search(&ese::encode_single(q))
-                .iter()
-                .any(|h| h.val == far.0),
-        )
-    });
-    assert_eq!(lanes, (false, true), "the fixture really is one-lane");
 }

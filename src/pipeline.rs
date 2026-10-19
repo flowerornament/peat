@@ -13,7 +13,13 @@
 use fold::pipeline::Keyed;
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Basis, Envelope, Event, EventId, Lane};
+use fold::pipeline::terminal::{
+    Multimap, Table,
+    search::{Bm25, Flat},
+};
+use fold::pipeline::{Aggregate, FilterMap, Map};
+
+use crate::event::{Basis, Envelope, Event, EventId};
 
 pub const DAY_MS: u64 = 86_400_000;
 
@@ -89,45 +95,6 @@ pub struct TextRow {
     pub kind: String,
     pub ts_ms: u64,
     pub cited: bool,
-}
-
-/// One distilled deposit, as the views hold it. The newest per
-/// `"<lane>/<key>"` is the current one; the trail keeps them all.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct DistRow {
-    pub lane: Lane,
-    pub key: String,
-    pub text: String,
-    pub open: bool,
-    pub cites: Vec<EventId>,
-    pub src: u64,
-    pub by: String,
-    pub session: String,
-    pub seq: u32,
-    pub ts_ms: u64,
-}
-
-/// Current state of one `(lane, key)`: newest deposit wins, ties by seq.
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct DistStats {
-    pub row: Option<DistRow>,
-    pub count: i64,
-}
-
-/// The open rows of one lane, newest first: the standing rulings. One
-/// rule for every reader (the wake, the distiller's register).
-pub fn standing<'a>(rows: impl IntoIterator<Item = &'a DistRow>, lane: Lane) -> Vec<&'a DistRow> {
-    let mut out: Vec<&DistRow> = rows
-        .into_iter()
-        .filter(|r| r.lane == lane && r.open)
-        .collect();
-    out.sort_by_key(|r| std::cmp::Reverse((r.ts_ms, r.seq)));
-    out
-}
-
-/// The table key for a distilled row.
-pub fn dist_key(lane: Lane, key: &str) -> String {
-    format!("{}/{key}", lane.tag())
 }
 
 // ------------------------------------------------------------- branch fns
@@ -280,50 +247,6 @@ pub fn subj_step(acc: &mut SubjStats, v: &ObsRow, delta: isize) {
     }
 }
 
-pub fn dist_row(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, DistRow>> {
-    let Event::Distill {
-        lane,
-        key,
-        text,
-        open,
-        cites,
-        src,
-        by,
-    } = &k.val.kind
-    else {
-        return None;
-    };
-    Some(Keyed::new(
-        dist_key(*lane, key),
-        DistRow {
-            lane: *lane,
-            key: key.clone(),
-            text: text.clone(),
-            open: *open,
-            cites: cites.clone(),
-            src: *src,
-            by: by.clone(),
-            session: k.val.session.clone(),
-            seq: k.key.1,
-            ts_ms: k.val.ts_ms,
-        },
-    ))
-}
-
-/// Newest wins, ties broken by seq — the same declared asymmetry as
-/// [`subj_step`]: a bare remove of the winner would leave it standing,
-/// and peat's write paths only append or revise in place.
-pub fn dist_step(acc: &mut DistStats, v: &DistRow, delta: isize) {
-    acc.count += delta as i64;
-    let newer = acc
-        .row
-        .as_ref()
-        .is_none_or(|r| (v.ts_ms, v.seq) >= (r.ts_ms, r.seq));
-    if delta > 0 && newer {
-        acc.row = Some(v.clone());
-    }
-}
-
 pub fn sess_row(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, Envelope>> {
     match &k.val.kind {
         Event::SessionMeta { .. }
@@ -357,84 +280,125 @@ pub fn sess_step(acc: &mut SessStats, e: &Envelope, delta: isize) {
     }
 }
 
-/// The pipeline expression. A macro because the resulting type contains
-/// closures and cannot be named; expand it where the concrete type is
-/// needed (`KeyedStream::new(path, peat_pipeline!())`).
-///
-/// Reader shape (mirrors the sink tree):
-/// `(days, files, (kw, vec, texts), (subjects, evidence), sessions, ledger)`
-#[macro_export]
-macro_rules! peat_pipeline {
-    () => {{
-        use fold::pipeline::{Aggregate, FilterMap, Map, terminal};
-        use $crate::pipeline as p;
-        (
-            FilterMap::new(
-                p::day_delta,
-                Aggregate::new("days", p::day_step, terminal::Table::new("days_tbl")),
-            ),
-            FilterMap::new(p::file_session, terminal::Multimap::new("file_sessions")),
-            FilterMap::new(
-                p::searchable,
-                (
-                    Map::new(
-                        |t: &fold::pipeline::Keyed<$crate::event::EventId, p::TextRow>| {
-                            fold::pipeline::Keyed::new(t.key.clone(), t.val.text.clone())
-                        },
-                        terminal::search::Bm25::new("kw"),
-                    ),
-                    // exact scan over the persisted rows — no in-memory graph to
-                    // rebuild per process. Same keyspace and row bytes as the
-                    // Hnsw sink it replaced, so the swap needed no view rebuild.
-                    // See .design/2026-09-02-vector-index-flat-then-graph-in-store.md
-                    FilterMap::new(
-                        p::embeddable,
-                        terminal::search::Flat::<
-                            $crate::event::EventId,
-                            f32,
-                            ::anny::metric::Cosine,
-                            { ese::DIMENSIONS },
-                            10,
-                        >::new("vec", ::anny::metric::Cosine),
-                    ),
-                    terminal::Table::new("texts"),
-                ),
-            ),
-            FilterMap::new(
-                p::obs_row,
-                (
-                    Aggregate::new("subj", p::subj_step, terminal::Table::new("subjects")),
-                    terminal::Multimap::new("evidence"),
-                ),
-            ),
-            FilterMap::new(
-                p::sess_row,
-                Aggregate::new("sess", p::sess_step, terminal::Table::new("sessions_tbl")),
-            ),
-            // ledger mirror: the full event stream as a point-readable,
-            // iterable table — what makes `asof` replay possible without
-            // re-parsing transcripts
-            terminal::Table::new("ledger"),
-        )
-    }};
+/// The Bm25 lane indexes the bare text of a [`TextRow`].
+pub fn text_of_row(t: &Keyed<EventId, TextRow>) -> Keyed<EventId, String> {
+    Keyed::new(t.key.clone(), t.val.text.clone())
 }
 
-/// The memory sidecar's pipeline (`.peat/memory`): what the distiller
-/// wrote, newest per `(lane, key)` in the table and every deposit in the
-/// trail. A separate store so the ledger never holds a derived event.
+type In = Keyed<EventId, Envelope>;
+type Text = Keyed<EventId, TextRow>;
+type Vector = Keyed<EventId, [f32; ese::DIMENSIONS]>;
+
+/// The sink tree, named. Every branch function is a `fn` pointer, so the
+/// whole graph is an ordinary type: commands take `&db::Db` like any value
+/// instead of living inside one function that expands a macro.
 ///
-/// Reader shape: `(distilled, dist_trail)`
-#[macro_export]
-macro_rules! memory_pipeline {
-    () => {{
-        use fold::pipeline::{Aggregate, FilterMap, terminal};
-        use $crate::pipeline as p;
+/// Reader shape (mirrors the tree):
+/// `(days, files, (kw, vec, texts), (subjects, evidence), sessions, ledger)`
+pub type Pipeline = (
+    FilterMap<
+        fn(&In) -> Option<Keyed<u64, DayDelta>>,
+        Aggregate<
+            u64,
+            DayDelta,
+            DayStats,
+            fn(&mut DayStats, &DayDelta, isize),
+            Table<u64, DayStats>,
+        >,
+        In,
+        Keyed<u64, DayDelta>,
+    >,
+    FilterMap<
+        fn(&In) -> Option<Keyed<String, String>>,
+        Multimap<String, String>,
+        In,
+        Keyed<String, String>,
+    >,
+    FilterMap<
+        fn(&In) -> Option<Text>,
+        (
+            Map<
+                fn(&Text) -> Keyed<EventId, String>,
+                Bm25<EventId, String>,
+                Text,
+                Keyed<EventId, String>,
+            >,
+            FilterMap<
+                fn(&Text) -> Option<Vector>,
+                Flat<EventId, f32, anny::metric::Cosine, { ese::DIMENSIONS }, 10>,
+                Text,
+                Vector,
+            >,
+            Table<EventId, TextRow>,
+        ),
+        In,
+        Text,
+    >,
+    FilterMap<
+        fn(&In) -> Option<Keyed<String, ObsRow>>,
+        (
+            Aggregate<
+                String,
+                ObsRow,
+                SubjStats,
+                fn(&mut SubjStats, &ObsRow, isize),
+                Table<String, SubjStats>,
+            >,
+            Multimap<String, ObsRow>,
+        ),
+        In,
+        Keyed<String, ObsRow>,
+    >,
+    FilterMap<
+        fn(&In) -> Option<Keyed<String, Envelope>>,
+        Aggregate<
+            String,
+            Envelope,
+            SessStats,
+            fn(&mut SessStats, &Envelope, isize),
+            Table<String, SessStats>,
+        >,
+        In,
+        Keyed<String, Envelope>,
+    >,
+    Table<EventId, Envelope>,
+);
+
+/// Build the graph. Keyspace names are the on-disk schema: renaming one
+/// orphans its rows (a view rebuild, see `db::VIEW_VERSION`).
+pub fn pipeline() -> Pipeline {
+    (
         FilterMap::new(
-            p::dist_row,
+            day_delta,
+            Aggregate::new("days", day_step, Table::new("days_tbl")),
+        ),
+        FilterMap::new(file_session, Multimap::new("file_sessions")),
+        FilterMap::new(
+            searchable,
             (
-                Aggregate::new("dist", p::dist_step, terminal::Table::new("distilled")),
-                terminal::Multimap::new("dist_trail"),
+                Map::new(text_of_row, Bm25::new("kw")),
+                // exact scan over the persisted rows — no in-memory graph to
+                // rebuild per process. Same keyspace and row bytes as the
+                // Hnsw sink it replaced, so the swap needed no view rebuild.
+                // See .design/2026-09-02-vector-index-flat-then-graph-in-store.md
+                FilterMap::new(embeddable, Flat::new("vec", anny::metric::Cosine)),
+                Table::new("texts"),
             ),
-        )
-    }};
+        ),
+        FilterMap::new(
+            obs_row,
+            (
+                Aggregate::new("subj", subj_step, Table::new("subjects")),
+                Multimap::new("evidence"),
+            ),
+        ),
+        FilterMap::new(
+            sess_row,
+            Aggregate::new("sess", sess_step, Table::new("sessions_tbl")),
+        ),
+        // ledger mirror: the full event stream as a point-readable,
+        // iterable table — what makes `asof` replay possible without
+        // re-parsing transcripts
+        Table::new("ledger"),
+    )
 }

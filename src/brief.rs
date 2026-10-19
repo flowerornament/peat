@@ -7,12 +7,11 @@
 use std::collections::HashMap;
 
 use fold::pipeline::Scored;
-use fold::pipeline::terminal::{MultimapReader, TableReader};
-use fold::stream::Readable;
 
-use crate::event::{EventId, Lane};
+use crate::db::Db;
+use crate::event::EventId;
 use crate::ladder;
-use crate::pipeline::{DAY_MS, DayStats, DistRow, ObsRow, SessStats, SubjStats, TextRow, standing};
+use crate::pipeline::{DAY_MS, DayStats, ObsRow, SessStats, SubjStats};
 use crate::transcript::{date_label, local_offset_ms};
 use crate::ui::{self, age_label, short_path, short_sess};
 
@@ -62,75 +61,9 @@ pub fn last_session<'a>(
     }
 }
 
-/// How many standing rulings the wake prints before it points at the
-/// full register.
-const RULINGS_SHOWN: usize = 10;
-
-/// Kinds worth pushing unasked: judged or summarizing text, never the raw
-/// firehose (user messages, mid-task chatter).
-const PUSH_KINDS: [&str; 3] = ["obs", "final", "compact"];
-
-/// What to put in front of an agent the moment a prompt arrives: hits the
-/// keyword and vector lanes *agree* on, from other sessions, not already
-/// pushed. Agreement is the precision gate — an unasked line costs
-/// attention, so one lane's guess is not enough.
-#[allow(clippy::too_many_arguments)]
-pub fn push_hits(
-    prompt: &str,
-    session: &str,
-    kw_search: impl Fn(&str, usize) -> Vec<Scored<f64, EventId>>,
-    vec_search: impl Fn(&[f32; ese::DIMENSIONS]) -> Vec<Scored<f32, EventId>>,
-    text_of: impl Fn(&EventId) -> Option<TextRow>,
-    seen: &std::collections::HashSet<EventId>,
-    max: usize,
-) -> Vec<(EventId, TextRow)> {
-    let query = crate::event::cap(prompt, 600);
-    let kw = kw_search(&query, 12);
-    let vec = vec_search(&ese::encode_single(&query));
-    let both = |id: &EventId| kw.iter().any(|h| &h.val == id) && vec.iter().any(|h| &h.val == id);
-    let mut texts: std::collections::HashSet<String> = Default::default();
-    let mut out = Vec::new();
-    for (id, _) in rrf(&kw, &vec) {
-        if out.len() >= max {
-            break;
-        }
-        if !both(&id) || id.0 == session || seen.contains(&id) {
-            continue;
-        }
-        let Some(t) = text_of(&id) else { continue };
-        if PUSH_KINDS.contains(&t.kind.as_str()) && texts.insert(t.text.clone()) {
-            out.push((id, t));
-        }
-    }
-    out
-}
-
-/// The lines `peat hook` injects for [`push_hits`]: disposition first,
-/// the read-the-whole-thing handle last.
-pub fn push_text(hits: &[(EventId, TextRow)], now: u64) -> String {
-    let mut s = String::from(
-        "peat: from this project's memory, possibly relevant to this prompt \
-(judge each; kind and age shown):",
-    );
-    for (id, t) in hits {
-        s.push_str(&format!(
-            "\n  [{} · {}] {}  ▸ peat {} {}",
-            t.kind,
-            age_label(now, t.ts_ms),
-            ui::clip(&t.text, 320),
-            short_sess(&id.0),
-            id.1
-        ));
-    }
-    s
-}
-
 #[derive(serde::Serialize)]
 pub struct Brief {
     pub today: String,
-    /// standing instructions from the person: hold until superseded
-    rulings: Vec<serde_json::Value>,
-    rulings_more: usize,
     active: Vec<serde_json::Value>,
     days: Vec<serde_json::Value>,
     /// the temporal ladder: the rest of the past, geometrically coarser,
@@ -142,211 +75,170 @@ pub struct Brief {
     subjects: Vec<serde_json::Value>,
 }
 
-/// Assemble the brief from one snapshot's readers. The two search indexes
-/// arrive as closures (their reader types carry tokenizer/const params);
-/// tables and the multimap come as concrete readers.
-#[allow(clippy::too_many_arguments)]
-pub fn assemble<R: Readable>(
-    query: &str,
-    now: u64,
-    budget: usize,
-    days: &TableReader<'_, R, u64, DayStats>,
-    files: &MultimapReader<'_, R, String, String>,
-    kw_search: impl Fn(&str, usize) -> Vec<Scored<f64, EventId>>,
-    vec_search: impl Fn(&[f32; ese::DIMENSIONS]) -> Vec<Scored<f32, EventId>>,
-    text_of: impl Fn(&EventId) -> Option<TextRow>,
-    subjects: &TableReader<'_, R, String, SubjStats>,
-    evidence: &MultimapReader<'_, R, String, ObsRow>,
-    sessions: &TableReader<'_, R, String, SessStats>,
-    dist: &[DistRow],
-    desk: &std::path::Path,
-) -> Brief {
-    let today_bucket = now / DAY_MS;
+/// Assemble the brief from one snapshot of the ledger. `desk` is the
+/// directory this desk works in, so "last session" means this desk's.
+pub fn assemble(st: &Db, query: &str, now: u64, budget: usize, desk: &std::path::Path) -> Brief {
+    st.rtx(
+        |(days, files, (kw, vec, texts), (subjects, evidence), sessions, _)| {
+            let today_bucket = now / DAY_MS;
 
-    // ---- the memory sidecar (read by the caller): window digests, which
-    // the bands and days look up by handle, and the rulings register
-    let windows: HashMap<&str, &str> = dist
-        .iter()
-        .filter(|r| r.lane == Lane::Digest)
-        .map(|r| (r.key.as_str(), r.text.as_str()))
-        .collect();
-    let digest_of = |key: &str| windows.get(key).map(|t| (*t).to_string());
-    let rulings = standing(dist, Lane::Ruling);
-    let rulings_out: Vec<serde_json::Value> = rulings
-        .iter()
-        .take(RULINGS_SHOWN)
-        .map(|r| {
-            serde_json::json!({
-                "subject": r.key, "text": r.text, "age": age_label(now, r.ts_ms),
-                // the citation is the expansion path: the user's own message
-                "handle": r.cites.first().map(|(s, q)| format!("▸ peat {} {q}", short_sess(s))),
-            })
-        })
-        .collect();
+            // ---- day digest: the 3 most recent non-empty days
+            let mut day_rows: Vec<(u64, DayStats)> = days.iter().collect();
+            day_rows.sort_by_key(|(d, _)| std::cmp::Reverse(*d));
 
-    // ---- day digest: the 3 most recent non-empty days
-    let mut day_rows: Vec<(u64, DayStats)> = days.iter().collect();
-    day_rows.sort_by_key(|(d, _)| std::cmp::Reverse(*d));
-
-    // ---- further back: the ladder over everything the digest doesn't show.
-    // Rung 0 is the materialized day table; the bands are a pure read-time
-    // regrouping of it (obs counted from the evidence trail — the judged
-    // lane is small). Frontier = the digest's oldest shown day.
-    let all_days: std::collections::BTreeMap<u64, DayStats> = day_rows.iter().cloned().collect();
-    let mut obs_per_day: std::collections::BTreeMap<u64, i64> = Default::default();
-    for (subject, _) in subjects.iter() {
-        for r in evidence.get(&subject) {
-            let r: ObsRow = r;
-            *obs_per_day.entry(r.ts_ms / DAY_MS).or_default() += 1;
-        }
-    }
-    let frontier = match day_rows.len() {
-        0 => today_bucket,
-        n => day_rows[n.min(3) - 1].0,
-    };
-    let mut further = ladder::bands(&all_days, &obs_per_day, frontier, budget);
-    for b in &mut further {
-        b.digest = b.handle.strip_prefix("peat ").and_then(digest_of);
-    }
-    let days_out: Vec<serde_json::Value> = day_rows
-        .iter()
-        .take(3)
-        .map(|(day, s)| {
-            let mut fs: Vec<(&String, &i64)> = s.files.iter().collect();
-            fs.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-            let key = crate::distill::day_key(*day);
-            serde_json::json!({
-                "digest": digest_of(&key),
-                "handle": format!("▸ peat {key}"),
-                "day": day_label(*day, today_bucket),
-                "tools": s.tools, "fails": s.fails,
-                "commits": s.commits, "sessions": s.sessions,
-                "files": fs.iter().take(4).map(|(f, _)| short_path(f)).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-
-    // ---- active now: sessions with activity in the last hour, by
-    // worktree — one agent's brief sees what the others are doing
-    let mut sess: Vec<(String, SessStats)> = sessions.iter().collect();
-    sess.sort_by_key(|(_, s)| std::cmp::Reverse(s.end_ms));
-    let active: Vec<serde_json::Value> = sess
-        .iter()
-        .filter(|(_, s)| now.saturating_sub(s.end_ms) < 3_600_000)
-        .take(6)
-        .map(|(id, s)| {
-            let place = s.cwd.rsplit('/').next().unwrap_or(&s.cwd);
-            serde_json::json!({
-                "where": place,
-                "session": short_sess(id),
-                "age": age_label(now, s.end_ms),
-                "commits": s.commits,
-            })
-        })
-        .collect();
-
-    let last_session = last_session(&sess, desk).map(|(s, here)| {
-        serde_json::json!({
-            "age": age_label(now, s.end_ms),
-            "branch": s.branch,
-            "final_msg": s.final_msg,
-            "where": s.cwd.rsplit('/').next().unwrap_or(&s.cwd),
-            "here": here,
-        })
-    });
-
-    // ---- files: most-touched over the digest window, with their sessions
-    let mut touch: HashMap<String, i64> = HashMap::new();
-    for (_, s) in day_rows.iter().take(3) {
-        for (f, n) in &s.files {
-            *touch.entry(f.clone()).or_default() += n;
-        }
-    }
-    let mut touch: Vec<(String, i64)> = touch.into_iter().collect();
-    touch.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let files_out: Vec<serde_json::Value> = touch
-        .iter()
-        .take(5)
-        .map(|(path, _)| {
-            let mut ss = files.get(path);
-            ss.sort();
-            ss.dedup();
-            serde_json::json!({
-                "path": short_path(path),
-                "sessions": ss.iter().map(|s| short_sess(s)).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-
-    // ---- relevant: hybrid RRF over the text indexes, disposition inline
-    let mut relevant: Vec<serde_json::Value> = Vec::new();
-    if !query.trim().is_empty() {
-        let fused = rrf(
-            &kw_search(query, 12),
-            &vec_search(&ese::encode_single(query)),
-        );
-        let mut per_session: HashMap<String, usize> = HashMap::new();
-        for (id, _) in fused {
-            if relevant.len() >= 6 {
-                break;
+            // ---- further back: the ladder over everything the digest doesn't show.
+            // Rung 0 is the materialized day table; the bands are a pure read-time
+            // regrouping of it (obs counted from the evidence trail — the judged
+            // lane is small). Frontier = the digest's oldest shown day.
+            let all_days: std::collections::BTreeMap<u64, DayStats> =
+                day_rows.iter().cloned().collect();
+            let mut obs_per_day: std::collections::BTreeMap<u64, i64> = Default::default();
+            for (subject, _) in subjects.iter() {
+                for r in evidence.get(&subject) {
+                    let r: ObsRow = r;
+                    *obs_per_day.entry(r.ts_ms / DAY_MS).or_default() += 1;
+                }
             }
-            // one session must not flood the list with its user/final/obs
-            let n = per_session.entry(id.0.clone()).or_default();
-            if *n >= 2 {
-                continue;
+            let frontier = match day_rows.len() {
+                0 => today_bucket,
+                n => day_rows[n.min(3) - 1].0,
+            };
+            let further = ladder::bands(&all_days, &obs_per_day, frontier, budget);
+            let days_out: Vec<serde_json::Value> = day_rows
+                .iter()
+                .take(3)
+                .map(|(day, s)| {
+                    let mut fs: Vec<(&String, &i64)> = s.files.iter().collect();
+                    fs.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+                    serde_json::json!({
+                        "day": day_label(*day, today_bucket),
+                        "tools": s.tools, "fails": s.fails,
+                        "commits": s.commits, "sessions": s.sessions,
+                        "files": fs.iter().take(4).map(|(f, _)| short_path(f)).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+
+            // ---- active now: sessions with activity in the last hour, by
+            // worktree — one agent's brief sees what the others are doing
+            let mut sess: Vec<(String, SessStats)> = sessions.iter().collect();
+            sess.sort_by_key(|(_, s)| std::cmp::Reverse(s.end_ms));
+            let active: Vec<serde_json::Value> = sess
+                .iter()
+                .filter(|(_, s)| now.saturating_sub(s.end_ms) < 3_600_000)
+                .take(6)
+                .map(|(id, s)| {
+                    let place = s.cwd.rsplit('/').next().unwrap_or(&s.cwd);
+                    serde_json::json!({
+                        "where": place,
+                        "session": short_sess(id),
+                        "age": age_label(now, s.end_ms),
+                        "commits": s.commits,
+                    })
+                })
+                .collect();
+
+            let last_session = last_session(&sess, desk).map(|(s, here)| {
+                serde_json::json!({
+                    "age": age_label(now, s.end_ms),
+                    "branch": s.branch,
+                    "final_msg": s.final_msg,
+                    "where": s.cwd.rsplit('/').next().unwrap_or(&s.cwd),
+                    "here": here,
+                })
+            });
+
+            // ---- files: most-touched over the digest window, with their sessions
+            let mut touch: HashMap<String, i64> = HashMap::new();
+            for (_, s) in day_rows.iter().take(3) {
+                for (f, n) in &s.files {
+                    *touch.entry(f.clone()).or_default() += n;
+                }
             }
-            let Some(t) = text_of(&id) else { continue };
-            *n += 1;
-            let mut tag = t.kind.clone();
-            if t.kind == "obs" && t.cited {
-                tag.push_str("·cited");
+            let mut touch: Vec<(String, i64)> = touch.into_iter().collect();
+            touch.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let files_out: Vec<serde_json::Value> = touch
+                .iter()
+                .take(5)
+                .map(|(path, _)| {
+                    let mut ss = files.get(path);
+                    ss.sort();
+                    ss.dedup();
+                    serde_json::json!({
+                        "path": short_path(path),
+                        "sessions": ss.iter().map(|s| short_sess(s)).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+
+            // ---- relevant: hybrid RRF over the text indexes, disposition inline
+            let mut relevant: Vec<serde_json::Value> = Vec::new();
+            if !query.trim().is_empty() {
+                let fused = rrf(
+                    &kw.search(query, 12),
+                    &vec.search(&ese::encode_single(query)),
+                );
+                let mut per_session: HashMap<String, usize> = HashMap::new();
+                for (id, _) in fused {
+                    if relevant.len() >= 6 {
+                        break;
+                    }
+                    // one session must not flood the list with its user/final/obs
+                    let n = per_session.entry(id.0.clone()).or_default();
+                    if *n >= 2 {
+                        continue;
+                    }
+                    let Some(t) = texts.get(&id) else { continue };
+                    *n += 1;
+                    let mut tag = t.kind.clone();
+                    if t.kind == "obs" && t.cited {
+                        tag.push_str("·cited");
+                    }
+                    relevant.push(serde_json::json!({
+                        "tag": format!("{tag} · {}", age_label(now, t.ts_ms)),
+                        "text": t.text,
+                    }));
+                }
             }
-            relevant.push(serde_json::json!({
-                "tag": format!("{tag} · {}", age_label(now, t.ts_ms)),
-                "text": t.text,
-            }));
-        }
-    }
 
-    // ---- subjects: current understanding, newest first
-    let mut subj: Vec<(String, SubjStats)> = subjects.iter().collect();
-    subj.sort_by_key(|(_, s)| std::cmp::Reverse(s.last_ms));
-    let subjects_out: Vec<serde_json::Value> = subj
-        .iter()
-        .take(5)
-        .map(|(name, s)| {
-            serde_json::json!({
-                "subject": name,
-                "count": s.count,
-                "cited": s.cited,
-                "age": age_label(now, s.last_ms),
-                // anchor disposition of the winning obs, pre-rendered:
-                // the brief is a bounded read, not a data API
-                "basis": s.basis.as_ref().map(|b| {
-                    b.label_with(crate::pipeline::commits_since(&all_days, s.last_ms))
-                }),
-                "text": s.text,
-                // the expansion path: briefs clip, trails read whole
-                "handle": crate::subject_handle_pub(name),
-            })
-        })
-        .collect();
+            // ---- subjects: current understanding, newest first
+            let mut subj: Vec<(String, SubjStats)> = subjects.iter().collect();
+            subj.sort_by_key(|(_, s)| std::cmp::Reverse(s.last_ms));
+            let subjects_out: Vec<serde_json::Value> = subj
+                .iter()
+                .take(5)
+                .map(|(name, s)| {
+                    serde_json::json!({
+                        "subject": name,
+                        "count": s.count,
+                        "cited": s.cited,
+                        "age": age_label(now, s.last_ms),
+                        // anchor disposition of the winning obs, pre-rendered:
+                        // the brief is a bounded read, not a data API
+                        "basis": s.basis.as_ref().map(|b| {
+                            b.label_with(crate::pipeline::commits_since(&all_days, s.last_ms))
+                        }),
+                        "text": s.text,
+                        // the expansion path: briefs clip, trails read whole
+                        "handle": crate::ui::subject_handle(name),
+                    })
+                })
+                .collect();
 
-    Brief {
-        // the caller's local calendar date, computed from the same civil-
-        // days math as the rest of the tool (no subprocess)
-        today: date_label((now as i64 + local_offset_ms()) as u64),
-        rulings_more: rulings.len().saturating_sub(rulings_out.len()),
-        rulings: rulings_out,
-
-        active,
-        days: days_out,
-        further,
-        last_session,
-        files: files_out,
-        relevant,
-        subjects: subjects_out,
-    }
+            Brief {
+                // the caller's local calendar date, computed from the same civil-
+                // days math as the rest of the tool (no subprocess)
+                today: date_label((now as i64 + local_offset_ms()) as u64),
+                active,
+                days: days_out,
+                further,
+                last_session,
+                files: files_out,
+                relevant,
+                subjects: subjects_out,
+            }
+        },
+    )
 }
 
 const DEFAULT_TMPL: &str = include_str!("../brief.tmpl");
@@ -382,4 +274,22 @@ fn day_label(bucket: u64, today: u64) -> String {
         1 => "yesterday".into(),
         n => format!("{n}d ago"),
     }
+}
+
+/// The brief's band budget: flag beats env beats default.
+pub fn budget(flag: Option<usize>) -> usize {
+    flag.or_else(|| {
+        std::env::var("PEAT_BRIEF_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
+    .unwrap_or(8)
+}
+
+/// This desk's root: the directory holding `.peat`.
+pub fn desk() -> std::path::PathBuf {
+    crate::db::peat_dir()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| "/".into())
 }

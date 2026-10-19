@@ -10,11 +10,6 @@ use serde::{Deserialize, Serialize};
 /// Bumped when the schema changes shape. Written into every envelope.
 pub const EVENT_VERSION: u16 = 3;
 
-/// Version stamped on envelopes in the memory sidecar (`.peat/memory`),
-/// the only store that holds [`Event::Distill`]. The ledger itself never
-/// carries one, so an older peat can always read the ledger.
-pub const MEMORY_VERSION: u16 = 4;
-
 pub type SessionId = String;
 
 /// `(session, seq)`. Seq is the transcript entry index for captured events;
@@ -30,15 +25,6 @@ pub const OBS_SEQ_BASE: u32 = 1 << 31;
 /// Reserved seq for a `FinalMsg` delivered by the Stop hook's
 /// `last_assistant_message` (authoritative over transcript tail parsing).
 pub const HOOK_FINAL_SEQ: u32 = OBS_SEQ_BASE - 1;
-
-/// Distilled events (`Event::Distill`) take seqs from here up — above
-/// every observation a session could plausibly accrue, so the three
-/// ranges (transcript, obs, distilled) never collide.
-pub const DISTILL_SEQ_BASE: u32 = 3 << 30;
-
-/// The synthetic session that owns window digests (day, week, month …):
-/// they summarize many sessions, so no real one can hold them.
-pub const DISTILL_SESSION: &str = "peat-distill";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -78,6 +64,10 @@ pub enum Event {
     FileTouch {
         path: String,
     },
+    /// Retired in 0.5.0: guessed from `git commit` command lines, so it
+    /// carried shell fragments and (under jj) never a hash. Nothing emits
+    /// it now; recorded ones still parse and still count. Which session
+    /// made a commit is read from the commit's own `Session:` trailer.
     Commit {
         hash: String,
         message: String,
@@ -129,14 +119,10 @@ pub enum Event {
         basis: Option<Basis>,
     },
 
-    // ---- the distiller's lane (memory sidecar only) ----
-    /// Something a model wrote *about* the ledger, deposited by `peat
-    /// distill`: a paragraph standing in for a calendar window, or a
-    /// standing instruction the person gave. Lives only in the memory
-    /// sidecar (`.peat/memory`), never in the ledger: it is derived, the
-    /// ledger can re-derive it, and an older peat must always be able to
-    /// read the ledger. Within the sidecar it is an event like any other:
-    /// replaced only by a newer one under the same `(lane, key)`.
+    // ---- retired ----
+    /// Written only by the 0.4.0 distiller, and only into its memory
+    /// sidecar, never into the ledger. Kept so the variant indices after it
+    /// stay put (postcard is positional) and any written envelope parses.
     Distill {
         lane: Lane,
         /// A calendar window (`2026-10-04`, `2026-w40`, `2026-10`,
@@ -156,9 +142,8 @@ pub enum Event {
     },
 }
 
-/// The two lifetimes distilled memory has. Digests fade (the ladder shows
-/// them coarser with age); rulings hold until superseded or withdrawn.
-/// Append-only: postcard encodes the variant index.
+/// The 0.4.0 distiller's lanes. Retired with [`Event::Distill`]; append-only
+/// (postcard encodes the variant index).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Lane {
     Digest,
@@ -337,14 +322,6 @@ impl Envelope {
             ts_ms,
             session: session.to_string(),
             kind,
-        }
-    }
-
-    /// An envelope for the memory sidecar, stamped [`MEMORY_VERSION`].
-    pub fn memory(session: &str, ts_ms: u64, kind: Event) -> Self {
-        Envelope {
-            v: MEMORY_VERSION,
-            ..Envelope::new(session, ts_ms, kind)
         }
     }
 }

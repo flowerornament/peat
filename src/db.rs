@@ -1,5 +1,6 @@
 //! Where the ledger lives and how it is opened: path policy, session-id
-//! policy, and the shared-database open-with-retry.
+//! policy, the shared-database open-with-retry, view migration, and the
+//! checkpoint policy.
 
 use std::path::PathBuf;
 
@@ -43,14 +44,6 @@ pub fn db_path() -> PathBuf {
         }
     }
     local
-}
-
-/// The memory sidecar beside the ledger (`.peat/memory`): what the
-/// distiller wrote. Losing it loses only model work.
-pub fn memory_path() -> PathBuf {
-    let db = db_path();
-    db.parent()
-        .map_or_else(|| PathBuf::from("memory"), |p| p.join("memory"))
 }
 
 /// The main repository root of a git worktree (`.git` is a file naming
@@ -169,35 +162,14 @@ impl Drop for QuietPanics {
 /// immediately.
 ///
 /// `make` re-creates the pipeline per attempt (the value is consumed by a
-/// failed open); generic over `P` so the pipeline type stays inferred at
-/// the call site and reader destructuring keeps compiling.
+/// failed open).
 pub fn open<P>(path: PathBuf, make: impl Fn() -> P) -> Ledger<P>
 where
     P: Push<Keyed<EventId, Envelope>>,
 {
-    open_waiting(path, make, None).expect("open_waiting exits rather than give up")
-}
-
-/// Open a store that is nice to have, not needed (the memory sidecar):
-/// wait at most `wait_secs` for its lock, then give up quietly with
-/// `None` — a reader degrades to "no digests" rather than stalling.
-pub fn try_open<P>(path: PathBuf, make: impl Fn() -> P, wait_secs: u64) -> Option<Ledger<P>>
-where
-    P: Push<Keyed<EventId, Envelope>>,
-{
-    open_waiting(path, make, Some(wait_secs))
-}
-
-fn open_waiting<P>(
-    path: PathBuf,
-    make: impl Fn() -> P,
-    give_up_after: Option<u64>,
-) -> Option<Ledger<P>>
-where
-    P: Push<Keyed<EventId, Envelope>>,
-{
-    let wait_max_ms: u64 = give_up_after
-        .or_else(|| LOCK_WAIT_SECS.get().copied())
+    let wait_max_ms: u64 = LOCK_WAIT_SECS
+        .get()
+        .copied()
         .or_else(|| {
             std::env::var("PEAT_LOCK_WAIT_SECS")
                 .ok()
@@ -205,7 +177,6 @@ where
         })
         .unwrap_or(120u64)
         * 1000;
-    let optional = give_up_after.is_some();
 
     // the data dir ignores itself (cargo's target/ pattern): without this
     // jj snapshots the database into the working commit on the very next
@@ -243,10 +214,6 @@ where
                 }
                 if waited >= wait_max_ms {
                     drop(quiet);
-                    if optional {
-                        phase.done();
-                        return None;
-                    }
                     if let Some(fallback) = LOCK_FAIL_FALLBACK.get() {
                         if !fallback.is_empty() {
                             println!("{fallback}");
@@ -261,11 +228,7 @@ minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
                     ));
                     std::process::exit(75); // EX_TEMPFAIL
                 }
-                if waited == 0
-                    && !ui::fancy_err()
-                    && LOCK_FAIL_FALLBACK.get().is_none()
-                    && !optional
-                {
+                if waited == 0 && !ui::fancy_err() && LOCK_FAIL_FALLBACK.get().is_none() {
                     // non-tty gets one plain line instead of a spinner
                     eprintln!("peat: ledger busy (another peat process); waiting…");
                 }
@@ -281,7 +244,144 @@ minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
         }
     };
     phase.done();
-    Some(Ledger(Some(st)))
+    Ledger(Some(st))
+}
+
+/// The ledger with peat's own pipeline: what every command reads.
+pub type Db = Ledger<crate::pipeline::Pipeline>;
+
+/// Open peat's ledger at `path` (views migrated first).
+pub fn open_db(path: PathBuf) -> Db {
+    migrate_views(&path);
+    open(path, crate::pipeline::pipeline)
+}
+
+/// The wall clock, read only at the capture/render boundary (obs
+/// timestamps, age labels, "today") — never inside a fold path.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+// ---- view schema ------------------------------------------------------
+
+/// Bumped when any view row changes shape (view rows are postcard and
+/// positional, same as the ledger — but views are disposable). On mismatch
+/// the ledger mirror, whose envelopes parse forever, is replayed through
+/// the current pipeline into a fresh database that replaces the old one.
+///
+/// History: 1 = v0.1.x shapes (implicit — no marker file);
+/// 2 = `ObsRow`/`SubjStats` carry the deposit-time `Basis`.
+pub const VIEW_VERSION: u32 = 2;
+
+/// A path beside the db dir: `.peat/db` → `.peat/db<suffix>`.
+pub fn beside(db: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    db.with_file_name(name)
+}
+
+/// Rebuild every view from the ledger when the view schema has moved on.
+/// Runs before every open; self-healing by construction — hook-driven
+/// invocations must never be the ones that fail. The previous database is
+/// kept at `db.old` (one generation), never deleted: the ledger is the
+/// investment, and this is the code path that touches it.
+pub fn migrate_views(dbdir: &std::path::Path) {
+    let marker = beside(dbdir, ".view-version");
+    let on_disk: Option<u32> = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+    if on_disk == Some(VIEW_VERSION) {
+        return;
+    }
+    if !dbdir.exists() {
+        // fresh database: no rows exist in any shape yet
+        let _ = std::fs::write(&marker, format!("{VIEW_VERSION}\n"));
+        return;
+    }
+    let phase = ui::Phase::new("view schema changed — rebuilding views from the ledger");
+    // reading only the ledger mirror is safe under any view schema:
+    // envelopes are additive-only, and nothing here reads a view row
+    let events: Vec<(EventId, Envelope)> = {
+        let st = open(dbdir.to_path_buf(), crate::pipeline::pipeline);
+        st.rtx(|(_, _, _, _, _, ledger)| ledger.iter().collect())
+    };
+    let fresh_dir = beside(dbdir, ".rebuild");
+    let _ = std::fs::remove_dir_all(&fresh_dir);
+    {
+        let mut fresh = open(fresh_dir.clone(), crate::pipeline::pipeline);
+        fresh.wtx(|tx| {
+            for (id, e) in &events {
+                tx.upsert(id, e);
+            }
+        });
+        fresh.checkpoint();
+    }
+    let backup = beside(dbdir, ".old");
+    let _ = std::fs::remove_dir_all(&backup);
+    let swap = std::fs::rename(dbdir, &backup).and_then(|()| std::fs::rename(&fresh_dir, dbdir));
+    if let Err(e) = swap {
+        ui::error(&format!(
+            "view rebuild could not swap databases at {}: {e} — the \
+original is intact (possibly at {})",
+            dbdir.display(),
+            backup.display()
+        ));
+        std::process::exit(1);
+    }
+    let _ = std::fs::write(&marker, format!("{VIEW_VERSION}\n"));
+    phase.done();
+    if events.is_empty() {
+        ui::note(
+            "views rebuilt from an empty ledger mirror — if this db held \
+sessions, re-run `peat capture` on their transcripts to backfill",
+        );
+    } else {
+        ui::note(&format!(
+            "view schema v{VIEW_VERSION}: rebuilt from {} ledger events \
+(previous db kept at {})",
+            events.len(),
+            backup.display()
+        ));
+    }
+}
+
+// ---- checkpoint policy ------------------------------------------------
+
+/// Checkpointing rotates the memtable and waits for the flush — and that
+/// flush rewrites index structures sized by the whole corpus, not by the
+/// delta just captured. On a large shared ledger it is tens of megabytes
+/// and minutes, spent inside whatever hook triggered it: a Stop capture of
+/// three new events would sit in `rotate_memtable_and_wait` while the user
+/// watched a frozen session (observed at 326 MB / ~67k events: >7 min for a
+/// 15-line delta).
+///
+/// So pay it when there is bulk work to justify it, or when the journal has
+/// grown enough that the next open would replay it anyway — and otherwise
+/// let the journal absorb the write. The tradeoff is deliberate: an
+/// un-checkpointed capture is durable across process exit (the journal is
+/// on disk and replayed on open) but not across power loss, and `peat
+/// compact` folds it on demand.
+pub const CHECKPOINT_MIN_EVENTS: usize = 500;
+pub const CHECKPOINT_JOURNAL_BYTES: u64 = 48 << 20;
+
+pub fn should_checkpoint(events: usize, journal_bytes: u64) -> bool {
+    events >= CHECKPOINT_MIN_EVENTS || journal_bytes >= CHECKPOINT_JOURNAL_BYTES
+}
+
+/// Bytes of unfolded journal beside the database (`*.jnl`).
+pub fn journal_bytes(db: &std::path::Path) -> u64 {
+    std::fs::read_dir(db)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "jnl"))
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 /// How long closing the ledger may take before peat stops waiting for it.
