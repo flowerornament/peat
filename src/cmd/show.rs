@@ -52,7 +52,7 @@ pub fn show(st: &Db, session: String, seq: Option<u32>) {
             ))
         );
         if !s.final_msg.is_empty() {
-            println!("\n{}\n  {}", ui::h1("closing message:"), &s.final_msg);
+            println!("\n{}\n  {}", ui::h1("closing message:"), s.final_msg);
         }
         if !obs.is_empty() {
             println!("\n{}", ui::h1("observations:"));
