@@ -22,24 +22,6 @@
           }
         ],
         "matcher": "manual|auto"
-      },
-      {
-        "hooks": [
-          {
-            "command": "peat hook",
-            "type": "command"
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "command": "peat hook",
-            "type": "command"
-          }
-        ]
       }
     ],
     "SessionStart": [
@@ -61,24 +43,6 @@
           }
         ],
         "matcher": "startup|resume|clear"
-      },
-      {
-        "hooks": [
-          {
-            "command": "peat hook",
-            "type": "command"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "command": "peat hook",
-            "type": "command"
-          }
-        ]
       }
     ],
     "UserPromptSubmit": [

@@ -19,7 +19,7 @@ just check     # fmt + clippy -D warnings + test — the land gate
 cargo run -- brief
 ```
 
-This repo captures its own development: every harness hook is the one command `peat hook` (`.claude/settings.json`, `.codex/hooks.json`), which briefs on start and captures at stop, compaction and session end. The ledger lives in the colocated checkout (`~/code/peat/.peat`); workspaces reach it through `.peat/redirect`.
+This repo captures its own development through the user-level hook `peat hook` (wired once in `~/.claude/settings.json`, `~/.claude-work/settings.json` and `~/.codex/config.toml`, never per repo), which briefs on start and captures at stop, compaction and session end. The ledger lives in the colocated checkout (`~/code/peat/.peat`); workspaces reach it through `.peat/redirect`.
 
 ## Version Control
 
