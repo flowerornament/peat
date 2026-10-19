@@ -4,7 +4,7 @@
 use crate::db::{self, Db};
 use crate::event::{Envelope, EventId};
 use crate::pipeline::{ObsRow, SessStats, SubjStats};
-use crate::ui::{self, age_label, clip, short_sess};
+use crate::ui::{self, age_label, short_sess};
 
 pub fn show(st: &Db, session: String, seq: Option<u32>) {
     let now = db::now_ms();
@@ -46,18 +46,13 @@ pub fn show(st: &Db, session: String, seq: Option<u32>) {
             "{} {}",
             ui::h1(&format!("== session {} ==", short_sess(&sess))),
             ui::dim(&format!(
-                "{place}{branch} · active {} – {} ago · {} commits",
+                "{place}{branch} · active {} – {} ago",
                 age_label(now, s.start_ms),
                 age_label(now, s.end_ms),
-                s.commits
             ))
         );
         if !s.final_msg.is_empty() {
-            println!(
-                "\n{}\n  {}",
-                ui::h1("closing message:"),
-                clip(&s.final_msg, 400)
-            );
+            println!("\n{}\n  {}", ui::h1("closing message:"), &s.final_msg);
         }
         if !obs.is_empty() {
             println!("\n{}", ui::h1("observations:"));

@@ -4,12 +4,8 @@
 use crate::cli::Filter;
 use crate::db::{self, Db};
 use crate::event::{Envelope, Event};
-use crate::pipeline::{DayStats, ObsRow, SubjStats};
+use crate::pipeline::{ObsRow, SubjStats};
 use crate::ui::{self, age_label, clip, short_sess};
-
-/// The day table pulled into memory for read-time joins (staleness of
-/// anchored claims); bounded by the number of days in the history.
-type DayCommits = std::collections::BTreeMap<u64, DayStats>;
 
 /// Rows in the vector lane above which the exact scan is past its design
 /// point and the store-resident graph (spec 2026-09-02, B′) is due. Measured
@@ -29,15 +25,14 @@ pub fn recall(
     if let Some(subj) = subject {
         // the claims register read: current text plus the full
         // evidence trail, straight from the evidence multimap
-        let (head, mut rows, days) = st.rtx(|(days, _, _, (subjects, evidence), _, _)| {
+        let (head, mut rows) = st.rtx(|(_, _, _, (subjects, evidence), _, _)| {
             (
                 subjects.get(&subj) as Option<SubjStats>,
                 evidence.get(&subj) as Vec<ObsRow>,
-                days.iter().collect::<DayCommits>(),
             )
         });
         rows.sort_by_key(|r| std::cmp::Reverse(r.ts_ms));
-        print_subject(&subj, head, &rows, &days, now, json);
+        print_subject(&subj, head, &rows, now, json);
         return;
     }
     let query = query.join(" ");
@@ -60,8 +55,7 @@ pub fn recall(
         basis: Option<String>,
         text: String,
     }
-    let (hits, lane) = st.rtx(|(days, _, (kw, vec, texts), _, _, ledger)| {
-        let day_commits: DayCommits = days.iter().collect();
+    let (hits, lane) = st.rtx(|(_, _, (kw, vec, texts), _, _, ledger)| {
         // the vector lane is an exact scan; this count is the
         // trip-wire for building the store-resident graph (spec
         // 2026-09-02). It appears where the cost is felt, nowhere else.
@@ -85,7 +79,7 @@ pub fn recall(
                     Event::Obs2 { basis, .. } => basis,
                     _ => None,
                 })
-                .map(|b| b.label_with(crate::pipeline::commits_since(&day_commits, t.ts_ms)));
+                .map(|b| b.label());
             Some(Hit {
                 score: (score * 1000.0).round() / 1000.0,
                 kind: t.kind,
@@ -140,10 +134,8 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
 /// Every subject, newest-wins text, support.
 pub fn subjects(st: &Db, json: bool) {
     let now = db::now_ms();
-    let (mut subj, days): (Vec<(String, SubjStats)>, DayCommits) =
-        st.rtx(|(days, _, _, (subjects, _), _, _)| {
-            (subjects.iter().collect(), days.iter().collect())
-        });
+    let mut subj: Vec<(String, SubjStats)> =
+        st.rtx(|(_, _, _, (subjects, _), _, _)| subjects.iter().collect());
     subj.sort_by_key(|(_, s)| std::cmp::Reverse(s.last_ms));
     if json {
         let rows: Vec<serde_json::Value> = subj
@@ -154,7 +146,6 @@ pub fn subjects(st: &Db, json: bool) {
                     "age": age_label(now, s.last_ms), "text": s.text,
                     "basis": s.basis.as_ref().map(|b| serde_json::json!({
                         "commit": b.commit, "dirty": b.dirty,
-                        "commits_since": crate::pipeline::commits_since(&days, s.last_ms),
                     })),
                 })
             })
@@ -173,10 +164,7 @@ pub fn subjects(st: &Db, json: bool) {
                     if s.cited { "" } else { ", uncited" },
                     age_label(now, s.last_ms),
                     match &s.basis {
-                        Some(b) => format!(
-                            ", {}",
-                            b.label_with(crate::pipeline::commits_since(&days, s.last_ms))
-                        ),
+                        Some(b) => format!(", {}", b.label()),
                         None => String::new(),
                     }
                 )),
@@ -188,14 +176,7 @@ pub fn subjects(st: &Db, json: bool) {
 }
 
 /// Print one subject's evidence trail (`recall --subject`).
-fn print_subject(
-    subj: &str,
-    head: Option<SubjStats>,
-    rows: &[ObsRow],
-    days: &DayCommits,
-    now: u64,
-    json: bool,
-) {
+fn print_subject(subj: &str, head: Option<SubjStats>, rows: &[ObsRow], now: u64, json: bool) {
     if json {
         println!(
             "{}",
@@ -208,7 +189,6 @@ fn print_subject(
                     "cited": !r.derived_from.is_empty(),
                     "basis": r.basis.as_ref().map(|b| serde_json::json!({
                         "commit": b.commit, "dirty": b.dirty,
-                        "commits_since": crate::pipeline::commits_since(days, r.ts_ms),
                     })),
                     "text": r.text,
                 })).collect::<Vec<_>>(),
@@ -242,10 +222,7 @@ fn print_subject(
                     " · cited"
                 },
                 match &r.basis {
-                    Some(b) => format!(
-                        " · {}",
-                        b.label_with(crate::pipeline::commits_since(days, r.ts_ms))
-                    ),
+                    Some(b) => format!(" · {}", b.label()),
                     None => String::new(),
                 }
             )),

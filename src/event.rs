@@ -303,16 +303,6 @@ impl Basis {
             if self.dirty { "+" } else { "" }
         )
     }
-
-    /// The full disposition: anchor tag plus how far the repo has moved
-    /// since (from [`crate::pipeline::commits_since`]).
-    pub fn label_with(&self, commits_since: i64) -> String {
-        if commits_since > 0 {
-            format!("{} · ~{commits_since} commits since", self.label())
-        } else {
-            self.label()
-        }
-    }
 }
 
 impl Envelope {

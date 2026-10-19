@@ -4,6 +4,24 @@ All notable changes to peat. The ledger is the API to our past; so is this file.
 
 Entries prefixed **Hooks:** touch the hook contract. Since 0.4.0 every hook is the constant command `peat hook` and its behaviour ships with the binary, so an upgrade needs no re-sync; before that, hooks were copied bash snippets stamped `hooks snippet vN` and had to be re-copied by hand.
 
+## Unreleased
+
+peat is now the record of what agents did, answerable from whatever an agent is already looking at; it no longer writes a reading of the past into agent context. Reasoning and evidence: `.design/2026-10-19-peat-is-the-record.md`.
+
+- **`peat <ref>`: from a commit, bead or file to the conversation behind it.** A commit or jj change id resolves through a read-only `jj log`: the description's `Session:` trailer (written by a repo's jj-identity SessionStart hook, beside `Jj-Workspace:` and `Agent:`) names the session; without one, the commit's `Jj-Workspace` and committer time are matched against the session whose cwd is that workspace and whose active span contains the time. A bead id resolves by text search, a file path through the file-touch index. The answer is the session(s) and the moment — the person's messages around it and the agent's closing message — each ending in the command that reads the whole thing, plus a `peat asof <date>` handle.
+- **The distiller is gone.** `peat distill`, day and window digest paragraphs, and `peat rulings` are removed, along with the `.peat/memory` sidecar and the `.peat/distill` / `.peat/distill-off` markers. A summary pushed into every session anchors a later model on an earlier reading, and a model-kept register of the person's instructions drifted from what the person said. No ledger ever held distilled events, so nothing migrates; the schema stays v3 and the `Distill`/`Lane` variants stay in the decoder, frozen.
+- **Commits are no longer guessed from command text.** Capture stopped writing `Commit` events from `git commit` / `jj describe` tool calls: they held shell fragments and, under jj, never a hash (herald: 186 events, 0 hashes). Old `Commit` events still parse. Commits are now read from the repository itself, by `peat <ref>`.
+- **The dashboard is for humans.** Bare `peat` and `peat brief` keep sessions active in the last hour, recent days, the ladder, the last closing message and recently touched files; they no longer show rulings, digests, current understanding or commit counts (commit counts came from command-line guesses; commits are read from jj now). Observation anchors print only the commit they were made against (`@abc1234+`); the `~N commits since` figure, which depended on those guesses, is gone. Observations appear only when asked: `peat subjects`, `peat <subject>`.
+- **Hooks: the SessionStart injection is two things.** This desk's previous closing message, when that session is not the one starting and ended within three days, and one line on how to look things up (`peat <commit|bead|file|words>`). It replaces the ~2k-token brief: no counts, no rulings, no current understanding.
+- **Hooks: four events.** `peat hook` is wired to `SessionStart`, `Stop`, `PreCompact` and `SessionEnd`. `UserPromptSubmit` (prompt-time push, `.peat/push`) and `PostToolUse` are retired; `peat hook install` removes peat from them, and `--check` expects the four.
+- **The peat skill is rewritten** for looking things up: a commit you are about to change, a bead you are picking up, a file, "why is it like this", and how far to trust what comes back. `peat obs` stays, for hard-won claims that outlive the work.
+
+Upgrading:
+
+- Run `peat hook install` once per desk (`--local` where the hooks live in `settings.local.json`, `--codex` for Codex) to drop the retired events and refresh the skill. On Codex, review and trust in `/hooks` if it asks.
+- `.peat/memory/`, `.peat/memory.mark`, `.peat/distill.lock`, `.peat/distill`, `.peat/distill-off`, `.peat/push`, `.peat/pushed-*` and `.peat/nudged-*` are unused; delete them.
+- `peat <commit>` needs jj on `PATH`. Commits without a `Session:` trailer resolve by workspace and time only where the repo's descriptions carry `Jj-Workspace:`.
+
 ## 0.4.0 — 2026-10-07
 
 v0.4.0 and v0.4.1 were tagged on 2026-10-06 and withdrawn the same day; this is the 0.4.0 that replaces them. Nothing either wrote reached a shared ledger.

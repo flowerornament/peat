@@ -6,5 +6,6 @@ pub mod capture;
 pub mod events;
 pub mod obs;
 pub mod recall;
+pub mod refs;
 pub mod show;
 pub mod zoom;

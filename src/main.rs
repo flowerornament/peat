@@ -27,6 +27,7 @@ pub mod ladder;
 pub mod pipeline;
 pub mod transcript;
 pub mod ui;
+pub mod vcs;
 
 use clap::Parser;
 
@@ -62,18 +63,16 @@ fn main() {
             return;
         }
         Some(Cmd::Hook { event, cmd: None }) => match hook::run(event) {
-            hook::Action::Brief => {
+            hook::Action::Brief { session } => {
+                // a busy ledger skips the brief silently, never the session
                 let _ = db::LOCK_WAIT_SECS.set(15);
-                Cli {
-                    query: vec![],
-                    json: false,
-                    budget: None,
-                    cmd: Some(Cmd::Brief {
-                        task: vec![],
-                        json: false,
-                        budget: None,
-                    }),
-                }
+                let _ = db::LOCK_FAIL_FALLBACK.set(brief::LOOKUP_LINE.to_string());
+                let st = db::open_db(db::db_path());
+                print!(
+                    "{}",
+                    brief::agent(&st, &brief::desk(), session.as_deref(), db::now_ms())
+                );
+                return;
             }
             _ => return,
         },
@@ -83,7 +82,8 @@ fn main() {
     let mut st = db::open_db(db::db_path());
 
     // ---- shape dispatch: bare `peat` orients; `peat <thing>` looks
-    // closer, inferring window / session / search from the argument's
+    // closer, inferring window / session / subject / ref / search from the
+    // argument's
     // shape. The header of every non-obvious read names its
     // interpretation, and explicit subcommands remain the unambiguous
     // spellings of the same reads.
@@ -97,8 +97,17 @@ fn main() {
         None => {
             let q = &cli.query;
             let now_bucket = db::now_ms() / DAY_MS;
-            let is_sess =
-                |s: &str| s.len() >= 6 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+            // a hex prefix names a session only when one has it; otherwise
+            // it may be a commit, tried below as a ref
+            let is_sess = |s: &str| {
+                s.len() >= 6
+                    && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+                    && st.rtx(|(_, _, _, _, sessions, _)| {
+                        sessions
+                            .iter()
+                            .any(|(id, _): (String, pipeline::SessStats)| id.starts_with(s))
+                    })
+            };
             if q.len() == 1 && ladder::parse_window(&q[0], now_bucket).is_some() {
                 Cmd::Zoom {
                     window: q[0].clone(),
@@ -123,6 +132,13 @@ fn main() {
                     subject: Some(q[0].clone()),
                     json: cli.json,
                 }
+            } else if q.len() == 1
+                && cmd::refs::classify(&q[0], &brief::desk()).is_some_and(|t| {
+                    cmd::refs::show(&st, &t, &brief::desk(), db::now_ms(), cli.json)
+                })
+            {
+                // a commit, change, file or token: the sessions behind it
+                return;
             } else {
                 let words = q.join(" ");
                 if !cli.json {
@@ -173,6 +189,17 @@ fn main() {
         Cmd::Subjects { json } => cmd::recall::subjects(&st, json),
         Cmd::Show { session, seq } => cmd::show::show(&st, session, seq),
         Cmd::Zoom { window, json } => cmd::zoom::zoom(&st, window, json),
+        Cmd::Ref { target, json } => {
+            let desk = brief::desk();
+            let resolved = cmd::refs::classify(&target, &desk)
+                .is_some_and(|t| cmd::refs::show(&st, &t, &desk, db::now_ms(), json));
+            if !resolved {
+                ui::error(&format!(
+                    "{target:?} names no commit, change, file or mention peat knows"
+                ));
+                std::process::exit(1);
+            }
+        }
         Cmd::Compact => cmd::capture::compact(&mut st),
         Cmd::Asof { date, task, json } => cmd::asof::asof(st, date, task, json),
         Cmd::Hook { .. } | Cmd::Skill => unreachable!("handled before the ledger opens"),

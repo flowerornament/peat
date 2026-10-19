@@ -40,22 +40,26 @@ impl Filter {
 #[command(
     name = "peat",
     version,
-    about = "agent memory as a fold",
-    long_about = "agent memory as a fold\n\n\
-Sessions deposit events into one append-forever ledger; every readable\n\
-surface is an incrementally maintained view over it. Bare `peat` orients;\n\
+    about = "the record of what agents did, as a fold",
+    long_about = "the record of what agents did, as a fold\n\n\
+Hooks capture every agent session into one append-forever ledger; every\n\
+readable surface is an incrementally maintained view over it. Bare `peat` orients;\n\
 `peat <thing>` looks closer, inferring what you mean from its shape; and\n\
 every line of every read ends in the exact command that goes one level\n\
 deeper.",
     after_help = "READING BY SHAPE:\n  \
-peat                       the brief (what hooks inject at session start)\n  \
+peat                       the dashboard: recent activity, the ladder, last session\n  \
 peat 2026-w33              a window: w33, 2026-07, 2026-08-14, q3, 2026, a..b\n  \
 peat 36f96b8d [seq]        a session by id prefix; one event with seq\n  \
 peat fm18                  a subject's full evidence trail (exact name)\n  \
+peat 1bdaa47b              a commit or jj change: the session that made it\n  \
+peat src/hook.rs           a file: the sessions that edited it\n  \
+peat peat-520              a bead id (or other token): sessions that mention it\n  \
 peat fold hnsw fix         anything else: hybrid keyword+semantic search\n\n\
 DEPOSITING:\n  \
 peat obs staging \"deploys go through the blue env first\" --from 1042\n\n\
-Subcommands are the explicit spellings of the same reads; hooks use them.",
+Subcommands are the explicit spellings of the same reads. Harness hooks run\n\
+`peat hook`, which injects only a short agent brief at session start.",
     args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
@@ -103,8 +107,9 @@ pub enum Cmd {
         #[arg(long)]
         at: Option<String>,
     },
-    /// The orientation `peat` prints bare: digest, temporal ladder, last
-    /// session, beliefs (SessionStart hooks inject its stdout as context)
+    /// The dashboard `peat` prints bare: active sessions, recent days, the
+    /// temporal ladder, last session, touched files (for a person at a
+    /// terminal; hooks inject a much shorter agent brief instead)
     Brief {
         task: Vec<String>,
         #[arg(long)]
@@ -153,6 +158,14 @@ pub enum Cmd {
     Zoom {
         /// w33, 2026-w33, 2026-07, 2026-08-14, q3, 2026, or a..b
         window: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The sessions behind a commit or change id, a bead id (or any token
+    /// the work mentions), or a file path, with the moment in each (what
+    /// `peat <ref>` runs)
+    Ref {
+        target: String,
         #[arg(long)]
         json: bool,
     },

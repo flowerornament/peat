@@ -139,16 +139,6 @@ pub fn day_step(acc: &mut DayStats, v: &DayDelta, delta: isize) {
     }
 }
 
-/// Commits recorded on days strictly after `ts_ms`'s day, read from the
-/// materialized day table — the staleness scale for an anchored claim.
-/// No git and no wall clock at read time; day-granular, so the figure is
-/// approximate (same-day later commits don't count) and rendered with `~`.
-pub fn commits_since(days: &std::collections::BTreeMap<u64, DayStats>, ts_ms: u64) -> i64 {
-    days.range(ts_ms / DAY_MS + 1..)
-        .map(|(_, s)| s.commits)
-        .sum()
-}
-
 pub fn file_session(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, String>> {
     match &k.val.kind {
         Event::FileTouch { path } => Some(Keyed::new(path.clone(), k.val.session.clone())),

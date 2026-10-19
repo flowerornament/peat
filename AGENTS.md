@@ -6,7 +6,7 @@ Agent memory as a fold. This is peat's home repo — extracted from the bogkit h
 
 ## Invariants (violations are bugs)
 
-- **stdout is an API.** Hooks inject `peat brief` stdout into agent context; `--json` is machine-read. Decoration lives on stderr behind `is_terminal`; piped output is byte-identical to unstyled.
+- **stdout is an API.** `peat hook` SessionStart stdout is injected into agent context; `--json` is machine-read. Decoration lives on stderr behind `is_terminal`; piped output is byte-identical to unstyled.
 - **No wall-clock reads in any fold path** — time enters only at the capture/render boundary.
 - **Additive schema evolution only**; every envelope carries its version.
 - **Briefs clip; trails don't** — every clipped line ends in the command that reads the whole thing.

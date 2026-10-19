@@ -11,7 +11,7 @@ use fold::pipeline::Scored;
 use crate::db::Db;
 use crate::event::EventId;
 use crate::ladder;
-use crate::pipeline::{DAY_MS, DayStats, ObsRow, SessStats, SubjStats};
+use crate::pipeline::{DAY_MS, DayStats, ObsRow, SessStats};
 use crate::transcript::{date_label, local_offset_ms};
 use crate::ui::{self, age_label, short_path, short_sess};
 
@@ -72,7 +72,6 @@ pub struct Brief {
     last_session: Option<serde_json::Value>,
     files: Vec<serde_json::Value>,
     relevant: Vec<serde_json::Value>,
-    subjects: Vec<serde_json::Value>,
 }
 
 /// Assemble the brief from one snapshot of the ledger. `desk` is the
@@ -113,7 +112,7 @@ pub fn assemble(st: &Db, query: &str, now: u64, budget: usize, desk: &std::path:
                     serde_json::json!({
                         "day": day_label(*day, today_bucket),
                         "tools": s.tools, "fails": s.fails,
-                        "commits": s.commits, "sessions": s.sessions,
+                        "sessions": s.sessions,
                         "files": fs.iter().take(4).map(|(f, _)| short_path(f)).collect::<Vec<_>>(),
                     })
                 })
@@ -133,7 +132,6 @@ pub fn assemble(st: &Db, query: &str, now: u64, budget: usize, desk: &std::path:
                         "where": place,
                         "session": short_sess(id),
                         "age": age_label(now, s.end_ms),
-                        "commits": s.commits,
                     })
                 })
                 .collect();
@@ -201,30 +199,6 @@ pub fn assemble(st: &Db, query: &str, now: u64, budget: usize, desk: &std::path:
                 }
             }
 
-            // ---- subjects: current understanding, newest first
-            let mut subj: Vec<(String, SubjStats)> = subjects.iter().collect();
-            subj.sort_by_key(|(_, s)| std::cmp::Reverse(s.last_ms));
-            let subjects_out: Vec<serde_json::Value> = subj
-                .iter()
-                .take(5)
-                .map(|(name, s)| {
-                    serde_json::json!({
-                        "subject": name,
-                        "count": s.count,
-                        "cited": s.cited,
-                        "age": age_label(now, s.last_ms),
-                        // anchor disposition of the winning obs, pre-rendered:
-                        // the brief is a bounded read, not a data API
-                        "basis": s.basis.as_ref().map(|b| {
-                            b.label_with(crate::pipeline::commits_since(&all_days, s.last_ms))
-                        }),
-                        "text": s.text,
-                        // the expansion path: briefs clip, trails read whole
-                        "handle": crate::ui::subject_handle(name),
-                    })
-                })
-                .collect();
-
             Brief {
                 // the caller's local calendar date, computed from the same civil-
                 // days math as the rest of the tool (no subprocess)
@@ -235,7 +209,6 @@ pub fn assemble(st: &Db, query: &str, now: u64, budget: usize, desk: &std::path:
                 last_session,
                 files: files_out,
                 relevant,
-                subjects: subjects_out,
             }
         },
     )
@@ -292,4 +265,40 @@ pub fn desk() -> std::path::PathBuf {
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| "/".into())
+}
+
+/// How recent this desk's last closed session must be for the agent brief
+/// to hand on its closing message. Older work is better read on demand
+/// than pushed: an old summary anchors a fresh session on old understanding.
+const RESUME_WINDOW_MS: u64 = 3 * DAY_MS;
+
+/// The one line every agent brief ends with: how to look the past up.
+pub const LOOKUP_LINE: &str = "peat: to see the sessions behind a commit, change, bead, file or topic before you change it, run `peat <commit|change|bead-id|path|words>`.";
+
+/// What `peat hook` injects at SessionStart: this desk's previous closing
+/// message when it is recent and not this very session (a resume already
+/// holds its own context), then the lookup line. Nothing else — counts,
+/// claims and other desks' work are read on demand.
+pub fn agent(st: &Db, desk: &std::path::Path, current: Option<&str>, now: u64) -> String {
+    let mut sess: Vec<(String, SessStats)> =
+        st.rtx(|(_, _, _, _, sessions, _)| sessions.iter().collect());
+    sess.sort_by_key(|(_, s)| std::cmp::Reverse(s.end_ms));
+    let mut out = String::new();
+    // this desk's newest closed session; when that is the one starting (a
+    // resume or compaction), it already holds its own context
+    if let Some((s, true)) = last_session(&sess, desk)
+        && let Some((id, _)) = sess.iter().find(|(_, x)| std::ptr::eq(x, s))
+        && current.is_none_or(|c| c != id)
+        && now.saturating_sub(s.end_ms) < RESUME_WINDOW_MS
+    {
+        out.push_str(&format!(
+            "peat: this desk's last session ({} ago) closed with:\n  {}  ▸ peat {}\n",
+            age_label(now, s.end_ms),
+            ui::clip(&s.final_msg, 800),
+            short_sess(id)
+        ));
+    }
+    out.push_str(LOOKUP_LINE);
+    out.push('\n');
+    out
 }

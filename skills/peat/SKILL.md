@@ -1,39 +1,39 @@
 ---
 name: peat
-description: Use when a repository has a .peat/ directory or peat hooks, or a peat brief appeared at session start. Acting on the person's standing rulings, recovering what past sessions did and decided, reading the evidence behind a line, searching prior work, or time-travelling to what was known on a date.
+description: Use when a repository has a .peat/ directory or peat hooks. Finding the session and conversation behind a commit, change, bead or file before changing it; answering "why is it like this"; reading what a past session said and decided; searching prior work; time-travelling to what was known on a date.
 ---
 
 # peat
 
-This project's memory. Hooks capture every session into one ledger, and a distiller turns what the harness already wrote (compaction summaries, closing messages, the person's own words, commits) into a paragraph per day and a register of **standing rulings**: the person's instructions, each citing the message it restates. You don't write any of it. **Read before acting, follow a handle when a line matters, and say what you learned in your reply:** it is captured.
+The record of what agents did here. Hooks capture every session; you write nothing. At session start you may see this desk's last closing message; nothing else is pushed. Look things up when you need them.
 
-## Read
+## When to look
 
-The brief is injected at session start. Every line ends in `▸ peat …`, the command that opens it one level deeper; run it rather than guessing.
+- **A commit or change you are about to amend, revert or build on:** `peat <commit-or-change-id>` gives the session that made it and what the person and the agent said.
+- **A bead you are picking up:** `peat <bead-id>` gives the sessions that worked on it.
+- **A file you are about to change, or "why is it like this":** `peat <path>`, then `peat <words>`. Search once before non-trivial design work.
 
 ```bash
-peat                         # the brief again
-peat <thing>                 # shape decides: a window (w40, 2026-09, 2026-10-04), a session id, a subject, or search words
-peat rulings                 # every standing ruling (--all adds withdrawn and superseded)
-peat asof 2026-07-10 <words> # what was known then
+peat <commit|change|bead|file|words>   # shape decides
+peat <session> [seq]                   # a whole session, or one event
+peat 2026-w40                          # a window of time
+peat asof 2026-10-04 <words>           # what was known then
 ```
 
-- **Standing rulings** are the person's instructions, newest wins. Follow them as you would the person; the handle shows the message each restates.
-- **Dated paragraphs** (a day, a week, a month) say what happened then. Open one when you need the detail.
-- Lines headed `peat: from this project's memory` may arrive with a prompt: past lines that match it. Judge each.
-- Before non-trivial design work, search once: `peat <words>`.
+Every line ends in `▸ peat …`, the command that opens it one level deeper. Run it rather than guessing from a clipped line.
 
-## Trust
+## How far to trust a line
 
-- **Who wrote it.** A ruling cites the person's own message. A paragraph is a model's reading of the day and can be wrong in detail. An observation (`current understanding`) is one agent's claim; `uncited` means it rests on nothing. When a line decides what you do, follow its handle down to the events.
-- **Age is on every line.** Something old about code may describe code that has moved; check the tree before repeating it.
-- **Briefs clip; trails don't.** A line ending in `…` is an index entry, not the claim.
+- **The person's own words** are the strongest thing peat holds. Still check them against the current instruction files (CLAUDE.md, AGENTS.md), which win.
+- **A closing message or compaction summary** is an agent's account of its own work. It can be wrong or optimistic; the commit and the tree are the evidence.
+- **An observation** is one agent's claim; `uncited` means it rests on nothing. Age is on every line, and an old line about code may describe code that has moved. Check the tree before repeating it.
+- peat records the past. Work state lives in beads, coordination in messages, history in jj; read those for what is true now.
 
-## Don'ts
+## Writing
 
-- Don't run `peat capture` or `peat distill` by hand; the hooks do both. Exception: `peat capture <transcript>` after a `Hook cancelled` message, to recover a tail.
-- Don't paste brief text into commits or issues; give the handle.
-- Don't touch `.peat/`. `.peat/off` pauses peat, `.peat/distill-off` pauses the distiller, `.peat/push` turns on prompt-time lines.
-- `peat obs <subject> "<one-line rule>" --from <seq>` exists for a rule nothing else would carry. You will rarely need it.
+- `peat obs <subject> "<one-line rule>" --from <seq>` is only for a hard-won claim that will outlive the work and that no commit, bead or instruction file would carry.
+- Don't run `peat capture` by hand; the hooks do. Exception: after a `Hook cancelled` message, `peat capture <transcript>` recovers the tail.
+- Don't paste peat output into commits or issues; give the handle.
+- Don't touch `.peat/`. `.peat/off` pauses peat.
 
-Several desks share one ledger: `active in the last hour` is the other agents, and a slow `peat` is usually a peer holding the lock.
+Several desks share one ledger; a slow `peat` is usually a peer holding the lock.

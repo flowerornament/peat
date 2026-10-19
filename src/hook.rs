@@ -83,8 +83,8 @@ pub enum Action {
     /// Nothing to do (unknown or retired event, missing field).
     Nothing,
     /// Print the agent brief. Needs the open ledger, so it is handed back
-    /// to `main`.
-    Brief,
+    /// to `main`; `session` is the starting session, never briefed on itself.
+    Brief { session: Option<String> },
     /// Detach a capture of this transcript with this closing message.
     Capture {
         transcript: PathBuf,
@@ -97,7 +97,9 @@ pub enum Action {
 /// no prompt-time push (see `.design/2026-10-19-peat-is-the-record.md`).
 pub fn plan(input: &Input) -> Action {
     match input.event.as_str() {
-        "SessionStart" => Action::Brief,
+        "SessionStart" => Action::Brief {
+            session: input.session_id.clone(),
+        },
         "Stop" | "PreCompact" | "SessionEnd" => {
             let transcript = input
                 .transcript_path
@@ -192,7 +194,7 @@ pub fn run(event_override: Option<String>) -> Action {
     }
     let action = plan(&input);
     match &action {
-        Action::Brief => {
+        Action::Brief { .. } => {
             if let Some(sid) = &input.session_id {
                 let dir = db::peat_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -507,7 +509,12 @@ mod tests {
 
     #[test]
     fn session_start_briefs_and_retired_events_do_nothing() {
-        assert_eq!(plan(&input("SessionStart")), Action::Brief);
+        assert_eq!(
+            plan(&input("SessionStart")),
+            Action::Brief {
+                session: Some("abc123".into())
+            }
+        );
         assert_eq!(plan(&input("UserPromptSubmit")), Action::Nothing);
         assert_eq!(plan(&input("PostToolUse")), Action::Nothing);
     }

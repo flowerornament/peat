@@ -46,7 +46,7 @@ pub fn zoom(st: &Db, window: String, json: bool) {
                 .map(|(s, e, l, h)| {
                     crate::ladder::digest(&day_rows, &obs_per_day, s, e, l, String::new(), h)
                 })
-                .filter(|b| b.tools + b.commits + b.obs > 0)
+                .filter(|b| b.tools + b.obs > 0)
                 .collect();
             // sessions overlapping the window, newest first
             let mut sess_rows: Vec<(String, SessStats)> = sessions
@@ -79,7 +79,7 @@ pub fn zoom(st: &Db, window: String, json: bool) {
                 "digest": head, "children": kids,
                 "sessions": sess_rows.iter().map(|(id, s)| serde_json::json!({
                     "session": short_sess(id), "cwd": s.cwd, "branch": s.branch,
-                    "commits": s.commits, "start_ms": s.start_ms, "end_ms": s.end_ms,
+                    "start_ms": s.start_ms, "end_ms": s.end_ms,
                 })).collect::<Vec<_>>(),
                 "said": finals.iter().map(|(id, ts, t)| serde_json::json!({
                     "session": short_sess(&id.0), "seq": id.1, "ts_ms": ts, "text": t,
@@ -114,9 +114,8 @@ pub fn zoom(st: &Db, window: String, json: bool) {
             }
         )),
         ui::dim(&format!(
-            "{} tools{fails} · {} commits · {} sessions{}",
+            "{} tools{fails} · {} sessions{}",
             ui::knum(head.tools),
-            head.commits,
             sess_rows.len(),
             if head.obs > 0 {
                 format!(" · {} obs", head.obs)
@@ -139,10 +138,9 @@ pub fn zoom(st: &Db, window: String, json: bool) {
                 format!(" · {}", b.files.join(", "))
             };
             println!(
-                "  {} {} tools{f} · {} commits{}{files}  {}",
+                "  {} {} tools{f}{}{files}  {}",
                 ui::dim(&format!("[{}]", b.label)),
                 ui::knum(b.tools),
-                b.commits,
                 if b.obs > 0 {
                     format!(" · {} obs", b.obs)
                 } else {
@@ -157,9 +155,8 @@ pub fn zoom(st: &Db, window: String, json: bool) {
         for (id, s) in &sess_rows {
             let place = s.cwd.rsplit('/').next().unwrap_or(&s.cwd);
             println!(
-                "  {} {place} · {} commits  {}",
+                "  {} {place}  {}",
                 ui::dim(&format!("[{}]", short_sess(id))),
-                s.commits,
                 ui::dim(&format!("▸ peat {}", short_sess(id))),
             );
         }

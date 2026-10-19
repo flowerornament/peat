@@ -592,25 +592,6 @@ fn anchored_and_legacy_obs_coexist() {
     assert!(anchored.basis.is_some());
 }
 
-#[test]
-fn commits_since_is_day_granular_and_clockless() {
-    let mut days: BTreeMap<u64, DayStats> = BTreeMap::new();
-    for (day, commits) in [(10u64, 3i64), (11, 2), (12, 5)] {
-        days.insert(
-            day,
-            DayStats {
-                commits,
-                ..Default::default()
-            },
-        );
-    }
-    let ts = |day: u64| day * DAY_MS + DAY_MS / 2;
-    assert_eq!(crate::pipeline::commits_since(&days, ts(9)), 10);
-    assert_eq!(crate::pipeline::commits_since(&days, ts(10)), 7);
-    assert_eq!(crate::pipeline::commits_since(&days, ts(12)), 0);
-    assert_eq!(crate::pipeline::commits_since(&days, ts(99)), 0);
-}
-
 /// A view-version mismatch must rebuild every view from the ledger mirror
 /// alone and keep the previous database as a backup — the migration path
 /// every existing db takes on first contact with a new view schema.
@@ -779,5 +760,66 @@ fn last_session_prefers_this_desk_on_a_shared_ledger() {
     assert_eq!(
         crate::brief::last_session(&[], std::path::Path::new("/x")).map(|_| ()),
         None
+    );
+}
+
+/// The agent brief hands on this desk's previous closing message — never an
+/// older session's in place of the current one's. After a compaction the
+/// current session is the desk's newest closed session; it already holds
+/// its context, so only the lookup line is printed.
+#[test]
+fn agent_brief_never_passes_off_an_older_session_as_the_last() {
+    let path = tmp();
+    let h = 3_600_000u64;
+    let now = 100 * DAY_MS;
+    let sess = |id: &str, end: u64, msg: &str| {
+        vec![
+            (
+                (id.to_string(), 0),
+                Envelope::new(
+                    id,
+                    end - h,
+                    Event::SessionMeta {
+                        cwd: "/desk".into(),
+                        branch: None,
+                        ese_version: String::new(),
+                    },
+                ),
+            ),
+            (
+                (id.to_string(), crate::event::HOOK_FINAL_SEQ),
+                Envelope::new(id, end, Event::FinalMsg { text: msg.into() }),
+            ),
+        ]
+    };
+    {
+        let mut st = crate::db::open(path.clone(), crate::pipeline::pipeline);
+        st.wtx(|tx| {
+            for (id, e) in sess("old", now - 5 * h, "older work")
+                .into_iter()
+                .chain(sess("cur", now - 2 * h, "current work"))
+            {
+                tx.upsert(&id, &e);
+            }
+        });
+    }
+    let st = crate::db::open(path, crate::pipeline::pipeline);
+    let desk = std::path::Path::new("/desk");
+    let compacted = crate::brief::agent(&st, desk, Some("cur"), now);
+    assert_eq!(
+        compacted,
+        format!("{}\n", crate::brief::LOOKUP_LINE),
+        "{compacted}"
+    );
+    let fresh = crate::brief::agent(&st, desk, Some("new"), now);
+    assert!(
+        fresh.contains("current work") && !fresh.contains("older work"),
+        "{fresh}"
+    );
+    let stale = crate::brief::agent(&st, desk, Some("new"), now + 4 * DAY_MS);
+    assert_eq!(
+        stale,
+        format!("{}\n", crate::brief::LOOKUP_LINE),
+        "older than three days"
     );
 }
