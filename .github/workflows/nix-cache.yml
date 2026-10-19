@@ -19,9 +19,11 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     steps:
+      # a push builds exactly the commit pushed; `release` may have moved
+      # again by the time this job starts. A manual run builds the tip.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: release
+          ref: ${{ github.event_name == 'push' && github.sha || 'release' }}
 
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
         with:

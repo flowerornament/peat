@@ -22,6 +22,9 @@ Upgrading:
 - `.peat/memory/`, `.peat/memory.mark`, `.peat/distill.lock`, `.peat/distill`, `.peat/distill-off`, `.peat/push`, `.peat/pushed-*` and `.peat/nudged-*` are unused; delete them.
 - `peat <commit>` needs jj on `PATH`. Commits without a `Session:` trailer resolve by workspace and time only where the repo's descriptions carry `Jj-Workspace:`.
 
+- **No git where jj owns the tree.** In a jj workspace there is no `.git`, so git walks up to whatever repo encloses it (often `~/.git`) and answers about that. `peat obs` now stamps its basis from the nearest repo root: jj's `@-` and whether `@` has changes where `.jj` is nearest, git's `HEAD` only in a git-only repo, never an enclosing one. `scripts/release.py` refuses to run anywhere but the colocated checkout, refuses when jj's and git's `main` differ (run `jj git fetch` there), tags the commit jj names, pushes `release` with a lease on the tip it observed, and strips `GIT_DIR`-style variables from every subprocess. The Nix cache workflow builds the commit that was pushed, not whatever `release` points at when the job starts. (peat-520.5; reported by andon-1b)
+- **`just land` puts the bookmark back when the push fails,** so a rejected push no longer leaves local `main` ahead of the remote and every later land refusing. (peat-o4i)
+
 ## 0.4.0 — 2026-10-07
 
 v0.4.0 and v0.4.1 were tagged on 2026-10-06 and withdrawn the same day; this is the 0.4.0 that replaces them. Nothing either wrote reached a shared ledger.

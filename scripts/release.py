@@ -12,11 +12,13 @@ full `verify` first; nothing tags unverified.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
 import tomllib
 from datetime import date
+from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,14 +37,28 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
+# git variables that redirect git away from the directory it runs in; an
+# inherited one would make every git call below act on some other repo
+GIT_REDIRECT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+def scrubbed_env(env: Mapping[str, str]) -> dict[str, str]:
+    return {k: v for k, v in env.items() if k not in GIT_REDIRECT_VARS}
+
+
 def run(cmd: list[str]) -> None:
     print(f"+ {' '.join(cmd)}", flush=True)
-    subprocess.run(cmd, cwd=ROOT, check=True)
+    subprocess.run(cmd, cwd=ROOT, check=True, env=scrubbed_env(os.environ))
 
 
 def capture(cmd: list[str]) -> str:
     result = subprocess.run(
-        cmd, cwd=ROOT, check=True, stdout=subprocess.PIPE, text=True
+        cmd,
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+        env=scrubbed_env(os.environ),
     )
     return result.stdout.strip()
 
@@ -156,6 +172,67 @@ def replace_once(text: str, pattern: str, replacement: str) -> str:
     return re.sub(pattern, replacement, text, count=1, flags=re.MULTILINE)
 
 
+# ------------------------------------------------------------ git guards
+# Pure decisions (unit-tested); the git/jj calls that feed them live in tag().
+# A jj workspace has no .git, and ~/.git exists, so git run from a workspace
+# silently answers about the home repo: git runs only in the colocated checkout.
+
+
+def colocated_refusal(root: Path, git_dir_is_dir: bool, toplevel: str | None) -> str | None:
+    """Why git must not run at `root`, or None when root is the colocated checkout.
+
+    `toplevel` is `git -C root rev-parse --show-toplevel`, asked only once
+    `root/.git` is known to be a directory (None when it was not asked).
+    """
+    where = (
+        "run releases from the colocated checkout (the one holding .git and .jj, "
+        "e.g. ~/code/peat), not a jj workspace"
+    )
+    if not git_dir_is_dir:
+        return f"{root} has no .git directory, so git would act on an enclosing repo — {where}"
+    if toplevel is None or Path(toplevel).resolve() != root.resolve():
+        return f"git's toplevel is {toplevel!r}, not {root} — {where}"
+    return None
+
+
+def main_agreement_refusal(jj_main: str, git_main: str) -> str | None:
+    if not jj_main:
+        return "jj has no `main` bookmark"
+    if jj_main != git_main:
+        return (
+            f"jj has main at {jj_main} but git has {git_main or 'nothing'} — "
+            "run `jj git fetch` in the colocated checkout (it also imports), then retry"
+        )
+    return None
+
+
+def remote_head(ls_remote_output: str, ref: str) -> str:
+    """The sha `git ls-remote` reports for `ref`, or "" when the remote lacks it."""
+    for line in ls_remote_output.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == ref:
+            return parts[0]
+    return ""
+
+
+def release_lease_arg(observed_release: str) -> str:
+    # an empty expectation tells git the remote ref must not exist yet
+    return f"--force-with-lease=release:{observed_release}"
+
+
+def require_colocated_checkout() -> None:
+    git_dir_is_dir = (ROOT / ".git").is_dir()
+    toplevel = None
+    if git_dir_is_dir:
+        try:
+            toplevel = capture(["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"])
+        except subprocess.CalledProcessError:
+            toplevel = None
+    refusal = colocated_refusal(ROOT, git_dir_is_dir, toplevel)
+    if refusal is not None:
+        fail(refusal)
+
+
 # ---------------------------------------------------------------- verbs
 
 
@@ -243,6 +320,14 @@ def verify() -> str:
 def tag(version: str) -> None:
     if SEMVER_RE.fullmatch(version) is None:
         fail("version must be semver like 0.1.1")
+    # before any git call: git outside the colocated checkout hits ~/.git
+    require_colocated_checkout()
+    # the lease expects the release tip seen now, not whatever origin/release
+    # the local tracking ref happens to hold when the push runs
+    observed_release = remote_head(
+        capture(["git", "ls-remote", "origin", "refs/heads/release"]),
+        "refs/heads/release",
+    )
     verified = verify()
     if verified != version:
         fail(f"repo is at version {verified}, expected {version}")
@@ -251,16 +336,28 @@ def tag(version: str) -> None:
     if capture(["git", "tag", "--list", tag_name]):
         fail(f"tag {tag_name} already exists")
 
+    # jj and git must name the same main, or git would tag a stale ref
+    jj_main = capture(
+        ["jj", "--ignore-working-copy", "log", "--no-graph", "-r", "main", "-T", "commit_id"]
+    )
+    try:
+        git_main = capture(["git", "rev-parse", "--verify", "refs/heads/main^{commit}"])
+    except subprocess.CalledProcessError:
+        git_main = ""
+    refusal = main_agreement_refusal(jj_main, git_main)
+    if refusal is not None:
+        fail(refusal)
+
     # tag what is published: local main must be what origin serves
-    local_main = capture(["jj", "log", "--no-graph", "-r", "main", "-T", "commit_id"])
     remote = capture(["git", "ls-remote", "origin", "refs/heads/main"])
-    if not remote.startswith(local_main):
+    if remote_head(remote, "refs/heads/main") != jj_main:
         fail("local main differs from origin/main — `just land` first")
 
-    run(["git", "tag", "-a", tag_name, "-m", f"peat {tag_name}", "main"])
+    # tag the commit jj reported, by id, so the tag cannot point elsewhere
+    run(["git", "tag", "-a", tag_name, "-m", f"peat {tag_name}", jj_main])
     run(["git", "push", "origin", tag_name])
     # `release` is the moving branch release-tracking flake inputs follow
-    run(["git", "push", "origin", "main:release", "--force-with-lease"])
+    run(["git", "push", "origin", "main:release", release_lease_arg(observed_release)])
     print(f"released {tag_name} — release branch moved; CI publishes binaries")
 
 

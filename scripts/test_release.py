@@ -5,15 +5,23 @@
 before it judges the repo. Keep every test subprocess-free.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from release import (
     CHANGELOG_INTRO_MARKER,
+    GIT_REDIRECT_VARS,
     changelog_entry_is_ready,
     changelog_entry_text,
     changelog_has_entry,
     changelog_insert_scaffold,
+    colocated_refusal,
+    main_agreement_refusal,
+    release_lease_arg,
+    remote_head,
     replace_once,
+    scrubbed_env,
 )
 
 CHANGELOG = (
@@ -122,6 +130,85 @@ class ReplaceOnceTests(unittest.TestCase):
     def test_fails_on_two_matches(self):
         with self.assertRaises(ValueError):
             replace_once("a\na\n", r"^a$", "b")
+
+
+class ColocatedCheckoutTests(unittest.TestCase):
+    def test_colocated_checkout_is_allowed(self):
+        root = Path("/repo/peat")
+        self.assertIsNone(colocated_refusal(root, True, "/repo/peat"))
+
+    def test_toplevel_compares_resolved_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # macOS /var -> /private/var: git reports the resolved path
+            self.assertIsNone(colocated_refusal(root, True, str(root.resolve())))
+
+    def test_workspace_without_git_dir_is_refused(self):
+        refusal = colocated_refusal(Path("/repo/peat-1a"), False, None)
+        self.assertIsNotNone(refusal)
+        self.assertIn("colocated checkout", refusal)
+
+    def test_git_answering_about_an_enclosing_repo_is_refused(self):
+        # a .git file (worktree) or a toplevel above root: git is not ours
+        refusal = colocated_refusal(Path("/home/u/code/peat"), True, "/home/u")
+        self.assertIsNotNone(refusal)
+        self.assertIn("colocated checkout", refusal)
+
+    def test_unknown_toplevel_is_refused(self):
+        self.assertIsNotNone(colocated_refusal(Path("/repo/peat"), True, None))
+
+
+class EnvScrubTests(unittest.TestCase):
+    def test_scrub_drops_every_git_redirect_var(self):
+        env = {name: "/elsewhere" for name in GIT_REDIRECT_VARS}
+        env.update({"PATH": "/bin", "GIT_AUTHOR_NAME": "a"})
+        self.assertEqual(scrubbed_env(env), {"PATH": "/bin", "GIT_AUTHOR_NAME": "a"})
+
+    def test_scrub_covers_the_four_named_vars(self):
+        self.assertEqual(
+            set(GIT_REDIRECT_VARS),
+            {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"},
+        )
+
+
+class MainAgreementTests(unittest.TestCase):
+    def test_agreeing_mains_pass(self):
+        self.assertIsNone(main_agreement_refusal("abc123", "abc123"))
+
+    def test_lagging_git_ref_is_refused_with_the_fix(self):
+        refusal = main_agreement_refusal("abc123", "def456")
+        self.assertIsNotNone(refusal)
+        self.assertIn("jj git fetch", refusal)
+
+    def test_missing_main_is_refused(self):
+        self.assertIsNotNone(main_agreement_refusal("", ""))
+        self.assertIsNotNone(main_agreement_refusal("abc123", ""))
+
+
+class RemoteHeadTests(unittest.TestCase):
+    def test_reads_the_named_ref(self):
+        out = "1111\trefs/heads/release\n2222\trefs/heads/release-old\n"
+        self.assertEqual(remote_head(out, "refs/heads/release"), "1111")
+
+    def test_absent_ref_is_empty(self):
+        self.assertEqual(remote_head("", "refs/heads/release"), "")
+
+    def test_a_prefix_is_not_a_match(self):
+        # the old check was `startswith(local_main)`, which an empty id passes
+        self.assertEqual(remote_head("2222\trefs/heads/mainline\n", "refs/heads/main"), "")
+
+
+class ReleaseLeaseTests(unittest.TestCase):
+    def test_lease_names_ref_and_observed_sha(self):
+        self.assertEqual(
+            release_lease_arg("1111"), "--force-with-lease=release:1111"
+        )
+
+    def test_lease_is_never_bare(self):
+        # bare --force-with-lease trusts the local tracking ref, which a
+        # fetch can move; an absent remote release must be expected absent
+        self.assertNotEqual(release_lease_arg(""), "--force-with-lease")
+        self.assertEqual(release_lease_arg(""), "--force-with-lease=release:")
 
 
 if __name__ == "__main__":

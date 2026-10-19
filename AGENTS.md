@@ -48,9 +48,11 @@ continuously, so there is nothing to stage.
   exception: `just release` tags and pushes from there). A jj workspace has no
   `.git`, and `~/.git` exists, so git in a workspace silently answers about
   the home directory. Never run a mutating git command.
-- Review a frozen commit in one visit, by commit id: `jj new <commit-id>`,
-  then `jj abandon @` and `jj new main` when done. Moving `@` costs a
-  rebuild.
+- Review a frozen commit by commit id from your own desk, without moving
+  `@`: `jj diff -r <commit-id>` and `jj file show -r <commit-id> <path>`.
+  To run it, check it out only in a desk that holds no work of its own
+  (`jj new <commit-id>` there, `jj abandon @` and `jj new main` after);
+  moving another agent's `@` loses their place and costs a rebuild.
 - Staleness: when another agent rewrites a commit under your `@`, every jj
   command refuses until `jj workspace update-stale`. Never `jj edit` a change
   that is an ancestor of another workspace's `@`.

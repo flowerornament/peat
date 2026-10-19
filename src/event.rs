@@ -164,8 +164,9 @@ impl Lane {
 /// fields is a new envelope variant, not a field here.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Basis {
-    /// Full commit hash of `HEAD` in the depositor's cwd (in a colocated
-    /// jj repo this is `@-`: the last named commit, not the working copy).
+    /// Full commit hash of the depositor's repo: jj's `@-` (the last named
+    /// commit, not the working copy) wherever `.jj` is the nearest root,
+    /// else git's `HEAD` — never a repo further up the tree.
     pub commit: String,
     /// Whether tracked files had uncommitted changes — the claim may rest
     /// on state no commit records.
