@@ -339,6 +339,126 @@ fn file_touch(tool: &str, input: &Value) -> Option<String> {
         .flatten()
 }
 
+/// Openings that mark what is left of a user-role message as text a
+/// harness or another agent put there: inter-agent envelopes (hail, and
+/// the tmux-bridge and `[from …]` forms before it), system notices,
+/// Claude Code's interrupt marker and instruction-file injection.
+const HARNESS_OPENINGS: &[&str] = &[
+    "[hail ",
+    "[from ",
+    "[tmux-bridge ",
+    "[SYSTEM",
+    "[Request interrupted",
+    "Caveat:",
+    "# AGENTS.md instructions",
+    "Codebase and user instructions are shown below",
+];
+
+/// Tags a harness wraps its own text in, as found in real ledgers (Claude
+/// Code, Codex, hooks). Any other tag is the person's — they write
+/// `<feedback>`, `<ctx>`, `<2a>` and paste `<pasted_content>` themselves.
+const HARNESS_TAGS: &[&str] = &[
+    "system-reminder",
+    "task-notification",
+    "subagent_notification",
+    "environment_context",
+    "codex_internal_context",
+    "user_instructions",
+    "turn_aborted",
+    "skill",
+    "user-prompt-submit-hook",
+    "pre-compact",
+    "ide_opened_file",
+    "ide_selection",
+];
+
+/// Harness tag families: `local-command-stdout`, `bash-input`, …
+const HARNESS_TAG_FAMILIES: &[&str] = &["local-command-", "bash-"];
+
+/// The name of the tag `t` opens with, if it opens with one.
+fn leading_tag(t: &str) -> Option<&str> {
+    let rest = t.strip_prefix('<')?;
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .unwrap_or(rest.len());
+    (end > 0).then(|| &rest[..end])
+}
+
+/// Where an inter-agent envelope interrupts the person's typing: the
+/// strict header forms only (`[hail kind:K from:…`, `[tmux-bridge from:…
+/// pane:%…`), so a message that merely mentions `[hail ...]` keeps it.
+fn embedded_envelope(t: &str) -> Option<usize> {
+    let hail = t.match_indices("[hail kind:").find(|(i, m)| {
+        let rest = &t[i + m.len()..];
+        let kind = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(0);
+        kind > 0 && rest[kind..].starts_with(" from:")
+    });
+    let bridge = t.match_indices("[tmux-bridge from:").find(|(i, _)| {
+        let head = &t[*i..];
+        head.find(']')
+            .is_some_and(|end| head[..end].contains(" pane:%"))
+    });
+    [hail, bridge].into_iter().flatten().map(|(i, _)| i).min()
+}
+
+/// The person's own words in a user-role message, or `None` when a
+/// harness or another agent put all of it there.
+///
+/// - Leading harness blocks ([`HARNESS_TAGS`]) are stripped and what
+///   follows is kept: a reminder the harness prepends does not unmake the
+///   words typed after it. An unclosed harness block is all harness.
+/// - A slash command or skill invocation is the harness's text around the
+///   person's arguments; those arguments are kept.
+/// - An attached image (`<image …></image>`) is the person's: the tag is
+///   dropped, the typed text kept. Any tag not on the list is kept as is.
+/// - An envelope that landed mid-message (another agent's reply arriving
+///   while the person typed) is cut, with everything after it; the
+///   person's text before it is kept.
+///
+/// Pure, and applied at read and index time only: the ledger keeps the
+/// raw text, so a better rule here is a view rebuild, never a re-capture.
+pub fn persons_words(text: &str) -> Option<String> {
+    let mut t = text.trim_start();
+    while let Some(name) = leading_tag(t) {
+        if name.starts_with("command-") {
+            // a slash command: the harness wraps the person's words in tags
+            let (_, rest) = t.split_once("<command-args>")?;
+            return before_envelope(rest.split("</command-args>").next().unwrap_or(""));
+        }
+        let close = format!("</{name}>");
+        t = if name == "image" {
+            // `<image …> </image>`, or a bare opening tag
+            match t.find(&close) {
+                Some(i) => &t[i + close.len()..],
+                None => &t[t.find('>').map_or(t.len(), |i| i + 1)..],
+            }
+        } else if HARNESS_TAGS.contains(&name)
+            || HARNESS_TAG_FAMILIES.iter().any(|f| name.starts_with(f))
+        {
+            &t[t.find(&close)? + close.len()..]
+        } else {
+            break;
+        }
+        .trim_start();
+    }
+    if t.starts_with("Base directory for this skill") {
+        return t
+            .rsplit_once("ARGUMENTS:")
+            .map(|(_, a)| a.trim().to_string())
+            .filter(|a| !a.is_empty());
+    }
+    if HARNESS_OPENINGS.iter().any(|o| t.starts_with(o)) {
+        return None;
+    }
+    before_envelope(t)
+}
+
+/// `t` up to any envelope that interrupted it, trimmed; `None` if empty.
+fn before_envelope(t: &str) -> Option<String> {
+    let t = embedded_envelope(t).map_or(t, |i| &t[..i]).trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
 /// Replace any parsed `FinalMsg` with the hook-provided closing message
 /// (`Stop` passes `last_assistant_message`, which is authoritative — the
 /// transcript file may lag the final turn).

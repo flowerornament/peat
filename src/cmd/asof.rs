@@ -41,6 +41,8 @@ pub fn asof(st: Db, date: String, task: Vec<String>, json: bool) {
         crate::transcript::local_offset_ms(),
         crate::brief::budget(None),
         &crate::brief::desk(),
+        // the past as it read then: no session runs inside it
+        None,
     );
     brief.today = format!("{date} · as of that day · {} events", events.len());
     if events.is_empty() {

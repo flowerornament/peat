@@ -3,8 +3,8 @@
 
 use crate::cli::Filter;
 use crate::db::{self, Db};
-use crate::event::{Envelope, Event};
-use crate::pipeline::{ObsRow, SubjStats};
+use crate::event::{Envelope, Event, EventId};
+use crate::pipeline::{ObsRow, SubjStats, TextRow};
 use crate::ui::{self, age_label, clip, short_sess};
 
 /// Rows in the vector lane above which the exact scan is past its design
@@ -12,13 +12,115 @@ use crate::ui::{self, age_label, clip, short_sess};
 /// growth puts this 18+ months out; a 10× fabric reaches it within a year.
 const FLAT_LANE_TRIP_WIRE: usize = 100_000;
 
+/// One recall hit; `--json` serializes it verbatim.
+#[derive(serde::Serialize)]
+pub struct Hit {
+    pub score: f64,
+    pub kind: String,
+    pub cited: bool,
+    pub age: String,
+    pub session: String,
+    pub seq: u32,
+    /// rendered anchor disposition (`@abc1234+ · ~4 commits
+    /// since`); obs hits only, and only when anchored
+    pub basis: Option<String>,
+    pub text: String,
+    /// the hit is from the session running this search, ranked after
+    /// every other session's hits
+    pub calling_session: bool,
+}
+
+/// The widest keyword fetch demotion may ask for.
+const KW_FETCH_MAX: usize = 4096;
+
+/// Fused hits for `query`, best first, at most `limit`, with the rows of
+/// `calling` (the session running the search) ranked after every other
+/// session's and flagged. Its rows are earlier turns: a sub-agent shares
+/// its coordinator's id and holds none of that context, so they are
+/// demoted, never dropped. The keyword fetch widens until `limit` other
+/// hits pass the filter or the index runs dry, so demotion never shrinks
+/// the result. Returns the hits and the vector lane's size.
+pub fn search(
+    st: &Db,
+    query: &str,
+    limit: usize,
+    filter: &Filter,
+    calling: Option<&str>,
+    now: u64,
+) -> (Vec<Hit>, usize) {
+    st.rtx(|(_, _, (kw, vec, texts), _, _, ledger)| {
+        // the vector lane is an exact scan; this count is the
+        // trip-wire for building the store-resident graph (spec
+        // 2026-09-02). It appears where the cost is felt, nowhere else.
+        let lane = vec.len();
+        let near = vec.search(&ese::encode_single(query));
+        let mine = |id: &EventId| calling == Some(id.0.as_str());
+        let first = (limit * 2).max(1);
+        let mut k = first;
+        let mut rows: Vec<(EventId, f64, TextRow)> = loop {
+            let words = kw.search(query, k);
+            let dry = words.len() < k || k >= KW_FETCH_MAX.max(first);
+            let rows: Vec<(EventId, f64, TextRow)> = crate::brief::rrf(&words, &near)
+                .into_iter()
+                .filter_map(|(id, score)| {
+                    let t: TextRow = texts.get(&id)?;
+                    filter
+                        .matches(now, &id.0, &t.kind, t.ts_ms)
+                        .then_some((id, score, t))
+                })
+                .collect();
+            // widen only when the calling session took the slots: a filter
+            // alone never pays a second search. One jump to the cap — a
+            // search costs its posting lists, not k
+            let crowded = rows.iter().any(|(id, _, _)| mine(id))
+                && rows.iter().filter(|(id, _, _)| !mine(id)).count() < limit;
+            if dry || !crowded {
+                break rows;
+            }
+            k = KW_FETCH_MAX.max(first);
+        };
+        // stable: each side keeps its fused order
+        rows.sort_by_key(|(id, _, _)| mine(id));
+        let hits = rows
+            .into_iter()
+            .take(limit)
+            .map(|(id, score, t)| {
+                // the anchor lives on the envelope, not the text row:
+                // a point-read per obs hit, bounded by `limit`
+                let basis = (t.kind == "obs")
+                    .then(|| ledger.get(&id))
+                    .flatten()
+                    .and_then(|e: Envelope| match e.kind {
+                        Event::Obs2 { basis, .. } => basis,
+                        _ => None,
+                    })
+                    .map(|b| b.label());
+                Hit {
+                    score: (score * 1000.0).round() / 1000.0,
+                    calling_session: mine(&id),
+                    kind: t.kind,
+                    cited: t.cited,
+                    age: age_label(now, t.ts_ms),
+                    session: short_sess(&id.0),
+                    seq: id.1,
+                    basis,
+                    text: t.text,
+                }
+            })
+            .collect();
+        (hits, lane)
+    })
+}
+
 /// Hybrid keyword+semantic search, or one subject's trail with `subject`.
+/// `calling` is the session running it, whose hits rank last ([`search`]).
 pub fn recall(
     st: &Db,
     query: Vec<String>,
     limit: usize,
     filter: Filter,
     subject: Option<String>,
+    calling: Option<String>,
     json: bool,
 ) {
     let now = db::now_ms();
@@ -40,61 +142,7 @@ pub fn recall(
         ui::error("recall needs a query (or --subject)");
         std::process::exit(1);
     }
-
-    /// One recall hit; `--json` serializes it verbatim.
-    #[derive(serde::Serialize)]
-    struct Hit {
-        score: f64,
-        kind: String,
-        cited: bool,
-        age: String,
-        session: String,
-        seq: u32,
-        /// rendered anchor disposition (`@abc1234+ · ~4 commits
-        /// since`); obs hits only, and only when anchored
-        basis: Option<String>,
-        text: String,
-    }
-    let (hits, lane) = st.rtx(|(_, _, (kw, vec, texts), _, _, ledger)| {
-        // the vector lane is an exact scan; this count is the
-        // trip-wire for building the store-resident graph (spec
-        // 2026-09-02). It appears where the cost is felt, nowhere else.
-        let lane = vec.len();
-        let hits: Vec<Hit> = crate::brief::rrf(
-            &kw.search(&query, limit * 2),
-            &vec.search(&ese::encode_single(&query)),
-        )
-        .into_iter()
-        .filter_map(|(id, score)| {
-            let t = texts.get(&id)?;
-            if !filter.matches(now, &id.0, &t.kind, t.ts_ms) {
-                return None;
-            }
-            // the anchor lives on the envelope, not the text row:
-            // a point-read per obs hit, bounded by `limit`
-            let basis = (t.kind == "obs")
-                .then(|| ledger.get(&id))
-                .flatten()
-                .and_then(|e: Envelope| match e.kind {
-                    Event::Obs2 { basis, .. } => basis,
-                    _ => None,
-                })
-                .map(|b| b.label());
-            Some(Hit {
-                score: (score * 1000.0).round() / 1000.0,
-                kind: t.kind,
-                cited: t.cited,
-                age: age_label(now, t.ts_ms),
-                session: short_sess(&id.0),
-                seq: id.1,
-                basis,
-                text: t.text,
-            })
-        })
-        .take(limit)
-        .collect();
-        (hits, lane)
-    });
+    let (hits, lane) = search(st, &query, limit, &filter, calling.as_deref(), now);
     if lane > FLAT_LANE_TRIP_WIRE {
         ui::note(&format!(
             "vector lane holds {lane} rows — past the exact scan's design point; \
@@ -122,6 +170,10 @@ time to build the store-resident graph (.design/2026-09-02-vector-index-flat-the
                     match &h.basis {
                         Some(b) => format!(" · {b}"),
                         None => String::new(),
+                    } + if h.calling_session {
+                        " · this session"
+                    } else {
+                        ""
                     }
                 )),
                 clip(&h.text, 200),

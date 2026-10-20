@@ -75,9 +75,10 @@ pub struct Brief {
 }
 
 /// Assemble the brief from one snapshot of the ledger. `desk` is the
-/// directory this desk works in, so "last session" means this desk's.
+/// directory this desk works in, so "last session" means this desk's;
 /// `offset_ms` is the reader's UTC offset: days are the reader's local
-/// days (see `ladder::local_days`).
+/// days (see `ladder::local_days`); `calling` is the running session,
+/// whose own rows `relevant` ranks after everyone else's.
 pub fn assemble(
     st: &Db,
     query: &str,
@@ -85,6 +86,7 @@ pub fn assemble(
     offset_ms: i64,
     budget: usize,
     desk: &std::path::Path,
+    calling: Option<String>,
 ) -> Brief {
     st.rtx(
         |(days, files, (kw, vec, texts), (subjects, evidence), sessions, _)| {
@@ -185,10 +187,14 @@ pub fn assemble(
             // ---- relevant: hybrid RRF over the text indexes, disposition inline
             let mut relevant: Vec<serde_json::Value> = Vec::new();
             if !query.trim().is_empty() {
-                let fused = rrf(
+                let mut fused = rrf(
                     &kw.search(query, 12),
                     &vec.search(&ese::encode_single(query)),
                 );
+                // the calling session's rows rank after everyone else's
+                // (stable, so each side keeps its fused order)
+                let mine = |id: &EventId| calling.as_deref() == Some(id.0.as_str());
+                fused.sort_by_key(|(id, _)| mine(id));
                 let mut per_session: HashMap<String, usize> = HashMap::new();
                 for (id, _) in fused {
                     if relevant.len() >= 6 {
@@ -205,9 +211,15 @@ pub fn assemble(
                     if t.kind == "obs" && t.cited {
                         tag.push_str("·cited");
                     }
+                    let calling_session = mine(&id);
                     relevant.push(serde_json::json!({
-                        "tag": format!("{tag} · {}", age_label(now, t.ts_ms)),
+                        "tag": format!(
+                            "{tag} · {}{}",
+                            age_label(now, t.ts_ms),
+                            if calling_session { " · this session" } else { "" }
+                        ),
                         "text": t.text,
+                        "calling_session": calling_session,
                     }));
                 }
             }

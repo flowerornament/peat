@@ -858,7 +858,7 @@ fn days_are_local_on_every_reading_surface() {
     let now = at("2026-10-19T04:00:00.000Z"); // local 2026-10-18 21:00
     let desk = std::path::Path::new("/desk");
     let brief = |offset: i64| {
-        serde_json::to_value(crate::brief::assemble(&st, "", now, offset, 8, desk)).unwrap()
+        serde_json::to_value(crate::brief::assemble(&st, "", now, offset, 8, desk, None)).unwrap()
     };
     let day = |b: &serde_json::Value, i: usize| {
         (
@@ -949,4 +949,505 @@ fn quarter_hour_offsets_split_days_exactly() {
             .collect::<Vec<_>>(),
         vec![(0, 1), (1, 1)]
     );
+}
+
+// ------------------------------------------------- recall: the person's words
+
+fn user(session: &str, seq: u32, ts: u64, text: &str) -> (EventId, Envelope) {
+    (
+        (session.to_string(), seq),
+        Envelope::new(session, ts, Event::UserMsg { text: text.into() }),
+    )
+}
+
+#[test]
+fn only_the_persons_words_count() {
+    use crate::transcript::persons_words;
+    assert_eq!(
+        persons_words("fix the gate").as_deref(),
+        Some("fix the gate")
+    );
+    assert_eq!(
+        persons_words("Base directory for this skill: /x\n# T\nARGUMENTS: move peat onto jj")
+            .as_deref(),
+        Some("move peat onto jj")
+    );
+    assert_eq!(
+        persons_words(
+            "<command-name>/template</command-name>\n<command-args>move peat onto jj</command-args>"
+        )
+        .as_deref(),
+        Some("move peat onto jj")
+    );
+    // samples from real ledgers: what the person typed survives the
+    // harness around it; their own tags are theirs
+    for (raw, words) in [
+        (
+            "\n<pasted_content id=\"a1\">\nmy notes",
+            "<pasted_content id=\"a1\">\nmy notes",
+        ),
+        (
+            "<image name=[Image #1] path=\"/s.png\"> </image> [Image #1] poor UI choices",
+            "[Image #1] poor UI choices",
+        ),
+        (
+            "<feedback>\nThe five defects\n</feedback>",
+            "<feedback>\nThe five defects\n</feedback>",
+        ),
+        (
+            "<ctx>murail</ctx> what next?",
+            "<ctx>murail</ctx> what next?",
+        ),
+        (
+            "<system-reminder>\nThe user started task_51d.\n</system-reminder>\n\nDouble check anything",
+            "Double check anything",
+        ),
+        (
+            "<pre-compact>\nchecked.md\n</pre-compact>\n\nYour original findings",
+            "Your original findings",
+        ),
+        // another agent's reply landed while the person typed: cut from
+        // the envelope on, keep what came before
+        (
+            "Does this con[tmux-bridge from:murail-codex pane:%8 at:0:2.2 — load the smux skill to reply] smcs.2 landed",
+            "Does this con",
+        ),
+        (
+            "Yes, and the zoom [hail kind:fyi from:murail-2a/%6 reply:%6 id:0906T065614-08e2] Both landed",
+            "Yes, and the zoom",
+        ),
+        (
+            "<command-name>/cd</command-name> <command-args>~/code/murail-1b[tmux-bridge from:murail-1a pane:%5 at:0:2.1 — load the smux skill to reply] Ruling</command-args>",
+            "~/code/murail-1b",
+        ),
+        // a mention of an envelope is not one
+        (
+            "a `[hail ...]` (or `[tmux-bridge from:...]`) envelope appears",
+            "a `[hail ...]` (or `[tmux-bridge from:...]`) envelope appears",
+        ),
+    ] {
+        assert_eq!(persons_words(raw).as_deref(), Some(words), "{raw}");
+    }
+    for h in [
+        "Base directory for this skill: /x\nno args",
+        "<task-notification>x",
+        "<system-reminder>x</system-reminder>",
+        "<system-reminder>unclosed, so all harness",
+        "<system-reminder>x</system-reminder>\n\nCodebase and user instructions are shown below.",
+        "<bash-input>pwd</bash-input>",
+        "<local-command-stdout>ok</local-command-stdout>",
+        "<turn_aborted>\nThe user interrupted\n</turn_aborted>",
+        "<codex_internal_context source=\"goal\">\n<objective>x</objective>\n</codex_internal_context>",
+        "<command-name>/compact</command-name>",
+        "<image name=[Image #1] path=\"/s.png\"> </image>",
+        "[hail kind:fyi] x",
+        "[from dev-claude reviewer] T1 VERDICT",
+        "[tmux-bridge from:dev-claude pane:%7] hi",
+        "[Request interrupted by user]",
+        "# AGENTS.md instructions for /x",
+        "   ",
+    ] {
+        assert_eq!(persons_words(h), None, "{h}");
+    }
+}
+
+/// Harness text arrives in the user role but is not what anyone said:
+/// indexing it makes recall return the harness. Only the person's words
+/// are searchable; the ledger keeps the raw message.
+#[test]
+fn injected_text_is_not_recallable() {
+    let mut st = open(tmp());
+    let hail = user(
+        "s",
+        16,
+        10,
+        "[hail kind:ask from:2b] zanzibar ruling please",
+    );
+    let reminder = user(
+        "s",
+        32,
+        20,
+        "<system-reminder>quokka rules</system-reminder>",
+    );
+    let slash = user(
+        "s",
+        48,
+        30,
+        "<command-name>/fix</command-name>\n<command-args>marmalade gate</command-args>",
+    );
+    st.wtx(|tx| {
+        for (id, e) in [&hail, &reminder, &slash] {
+            tx.upsert(id, e);
+        }
+    });
+    assert!(find_kw!(st, "zanzibar").is_empty(), "hail envelope indexed");
+    assert!(find_kw!(st, "quokka").is_empty(), "system reminder indexed");
+    assert_eq!(find_kw!(st, "marmalade"), vec![slash.0.clone()]);
+    // the row holds the arguments, not the wrapper; the ledger, everything
+    let (row, raw) = st.rtx(|(_, _, (_, _, texts), _, _, ledger)| {
+        (
+            texts
+                .get(&slash.0)
+                .map(|t: crate::pipeline::TextRow| t.text),
+            ledger.get(&hail.0).map(|e: Envelope| e.kind.summary()),
+        )
+    });
+    assert_eq!(row.as_deref(), Some("marmalade gate"));
+    assert!(raw.is_some_and(|s| s.contains("zanzibar")));
+}
+
+// --------------------------------------------- recall: the calling session
+
+/// A ledger where the calling session ("me") and two others all match.
+fn calling_fixture() -> crate::db::Db {
+    let path = tmp();
+    {
+        let mut st = crate::db::open(path.clone(), crate::pipeline::pipeline);
+        st.wtx(|tx| {
+            for (id, e) in [
+                user("me", 16, 10, "the ferrous wombat ferrous wombat"),
+                user("me", 32, 11, "ferrous wombat again"),
+                user("other", 16, 20, "the ferrous wombat lives in fold"),
+                user("third", 16, 30, "a ferrous wombat note"),
+            ] {
+                tx.upsert(&id, &e);
+            }
+        });
+    }
+    crate::db::open(path, crate::pipeline::pipeline)
+}
+
+/// The calling session's rows are earlier turns the caller may not hold
+/// (a sub-agent shares its coordinator's id): ranked after every other
+/// session's, flagged, never dropped — and never at another hit's cost.
+#[test]
+fn recall_ranks_the_calling_session_last() {
+    use crate::cmd::recall::search;
+    let st = calling_fixture();
+    let all = crate::cli::Filter::default();
+    let order = |limit: usize, calling: Option<&str>| {
+        let (hits, _) = search(&st, "ferrous wombat", limit, &all, calling, 100);
+        hits.into_iter()
+            .map(|h| (h.session, h.calling_session))
+            .collect::<Vec<_>>()
+    };
+    let unflagged = order(12, None);
+    assert_eq!(unflagged.len(), 4);
+    assert!(unflagged.iter().all(|(_, c)| !c));
+    let demoted = order(12, Some("me"));
+    assert_eq!(demoted.len(), 4, "demotion dropped a hit");
+    let tail: Vec<_> = demoted[2..].to_vec();
+    assert_eq!(tail, [("me".into(), true), ("me".into(), true)]);
+    assert!(demoted[..2].iter().all(|(s, c)| s != "me" && !c));
+    // a limit the other sessions can fill is filled by them
+    let two = order(2, Some("me"));
+    assert!(two.iter().all(|(s, _)| s != "me"), "{two:?}");
+}
+
+/// When the calling session fills the first keyword page, the fetch
+/// widens: another session's hit is found, not crowded out. Its row is a
+/// long one (keyword lane only, too long to embed), so only the keyword
+/// fetch can reach it.
+#[test]
+fn recall_widens_past_the_calling_session() {
+    use crate::cmd::recall::search;
+    let path = tmp();
+    {
+        let mut st = crate::db::open(path.clone(), crate::pipeline::pipeline);
+        let long = format!(
+            "ferrous wombat {}",
+            "filler words about nothing ".repeat(20)
+        );
+        assert!(long.len() > crate::pipeline::EMBED_USER_MAX);
+        st.wtx(|tx| {
+            for n in 0..4u32 {
+                let (id, e) = user("me", 16 * (n + 1), 10, "ferrous wombat");
+                tx.upsert(&id, &e);
+            }
+            let (id, e) = user("other", 16, 20, &long);
+            tx.upsert(&id, &e);
+        });
+    }
+    let st = crate::db::open(path, crate::pipeline::pipeline);
+    let (hits, _) = search(
+        &st,
+        "ferrous wombat",
+        1,
+        &crate::cli::Filter::default(),
+        Some("me"),
+        100,
+    );
+    let got: Vec<_> = hits.iter().map(|h| h.session.as_str()).collect();
+    assert_eq!(got, ["other"]);
+}
+
+/// The brief's `relevant` section follows the same rule.
+#[test]
+fn brief_ranks_the_calling_session_last() {
+    let st = calling_fixture();
+    let rel = |calling: Option<&str>| {
+        let b = serde_json::to_value(crate::brief::assemble(
+            &st,
+            "ferrous wombat",
+            100,
+            0,
+            8,
+            std::path::Path::new("/desk"),
+            calling.map(String::from),
+        ))
+        .unwrap();
+        b["relevant"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["calling_session"].as_bool().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rel(None), [false; 4]);
+    assert_eq!(rel(Some("me")), [false, false, true, true]);
+}
+
+#[test]
+fn calling_session_trusts_only_exact_env_evidence() {
+    let env = |pairs: &[(&str, &str)]| {
+        crate::db::calling_session(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+    };
+    assert_eq!(env(&[]), None);
+    assert_eq!(
+        env(&[("CLAUDE_CODE_SESSION_ID", "c1")]).as_deref(),
+        Some("c1")
+    );
+    assert_eq!(env(&[("CLAUDE_CODE_SESSION_ID", " ")]), None);
+    // a codex started from a Claude pane inherits Claude's id: codex wins
+    assert_eq!(
+        env(&[("CLAUDE_CODE_SESSION_ID", "c1"), ("CODEX_THREAD_ID", "x1")]).as_deref(),
+        Some("x1")
+    );
+    // a variable Codex sets per process means codex: the inherited Claude
+    // id is never evidence there
+    for codex in [
+        "CODEX_SANDBOX",
+        "CODEX_TOOL_CALL_ID",
+        "CODEX_SANDBOX_NETWORK_DISABLED",
+    ] {
+        assert_eq!(
+            env(&[("CLAUDE_CODE_SESSION_ID", "c1"), (codex, "1")]),
+            None,
+            "{codex}"
+        );
+    }
+    // a person's own exported CODEX_HOME does not make a Claude session codex
+    assert_eq!(
+        env(&[("CLAUDE_CODE_SESSION_ID", "c1"), ("CODEX_HOME", "/h")]).as_deref(),
+        Some("c1")
+    );
+}
+
+/// Commits are joined to a session by its parsed `Session:` trailer in a
+/// real jj repo — never by a body line that merely mentions the id.
+#[test]
+fn session_commits_read_the_trailer_not_the_text() {
+    if std::process::Command::new("jj")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("jj absent: skipped");
+        return;
+    }
+    let repo = tmp();
+    std::fs::create_dir_all(&repo).unwrap();
+    // jj reports resolved paths, as a session's recorded cwd is (getcwd);
+    // the temp dir is a symlink on macOS
+    let repo = repo.canonicalize().unwrap();
+    let jj = |args: &[&str]| {
+        let out = std::process::Command::new("jj")
+            .current_dir(&repo)
+            .env("JJ_CONFIG", "/dev/null")
+            .env("JJ_USER", "t")
+            .env("JJ_EMAIL", "t@t")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    jj(&["git", "init"]);
+    let id = "e4acd12f-b1bd-4524-b96f-c21d5522a932";
+    for msg in [
+        format!("full\n\nSession: {id}"),
+        "prefix\n\nSession: e4acd12f-b1bd".to_string(),
+        format!("mention\n\nthe body names Session: {id} in passing\n\nAgent: codex"),
+        format!("longer\n\nSession: {id}-extra"),
+        "other\n\nSession: 01a153a5-a16f".to_string(),
+    ] {
+        jj(&["new", "-m", &msg]);
+    }
+    let (found, cut) = crate::vcs::session_commits(&repo, id).unwrap();
+    let mut subjects: Vec<String> = found
+        .iter()
+        .map(|c| c.description.lines().next().unwrap().to_string())
+        .collect();
+    subjects.sort();
+    assert_eq!(subjects, ["full", "prefix"]);
+    assert!(!cut);
+
+    // a retired desk of this repo: its directory is gone, jj still knows it
+    let desk = repo.with_extension("ws2");
+    jj(&["workspace", "add", desk.to_str().unwrap()]);
+    std::fs::remove_dir_all(&desk).unwrap();
+    let inside = desk.join("src");
+    assert_eq!(
+        crate::cmd::show::session_repo(inside.to_str().unwrap(), &repo),
+        Some(repo.clone())
+    );
+    // gone, and never one of this repo's workspaces: no repo to ask
+    let elsewhere = repo.with_extension("other").join("src");
+    assert_eq!(
+        crate::cmd::show::session_repo(elsewhere.to_str().unwrap(), &repo),
+        None
+    );
+}
+
+/// A session whose desk is gone reads its commits from this repo only when
+/// that desk was one of this repo's workspaces; otherwise none, not zero.
+#[test]
+fn a_gone_desk_reads_commits_only_from_its_own_repo() {
+    use crate::cmd::show::session_repo;
+    let here = std::env::temp_dir();
+    assert_eq!(
+        session_repo(here.to_str().unwrap(), std::path::Path::new("/nowhere")),
+        Some(here.clone())
+    );
+    // a path that never existed, against a directory jj knows nothing of
+    assert_eq!(session_repo("/gone/desk-1a", &here), None);
+}
+
+// ------------------------------------------------------- the session digest
+
+fn sess_events() -> Vec<(EventId, Envelope)> {
+    let e = |seq: u32, ts: u64, kind: Event| (("s".to_string(), seq), Envelope::new("s", ts, kind));
+    let call = |seq: u32, ts: u64, tool: &str, ok: bool| {
+        e(
+            seq,
+            ts,
+            Event::ToolCall {
+                tool: tool.into(),
+                detail: format!("{tool}-{seq}"),
+                ok,
+            },
+        )
+    };
+    let file = |seq: u32, ts: u64, p: &str| e(seq, ts, Event::FileTouch { path: p.into() });
+    vec![
+        e(
+            0,
+            5,
+            Event::SessionMeta {
+                cwd: "/desk".into(),
+                branch: None,
+                ese_version: String::new(),
+            },
+        ),
+        // harness text first: it is not the intent
+        user("s", 16, 10, "<system-reminder>be nice</system-reminder>"),
+        user("s", 17, 20, "build the session digest"),
+        user("s", 64, 90, "and then land it"),
+        call(32, 30, "Bash", true),
+        call(33, 31, "Bash", false),
+        call(34, 32, "Read", true),
+        call(48, 40, "exec_command", false),
+        call(49, 41, "Bash", false),
+        call(50, 42, "Bash", false),
+        file(47, 30, "/desk/src/a.rs"),
+        file(63, 40, "/desk/src/a.rs"),
+        file(79, 50, "/desk/src/b.rs"),
+    ]
+}
+
+fn sess_row(st: &KeyedStream<EventId, Envelope, crate::pipeline::Pipeline>) -> serde_json::Value {
+    st.rtx(|(_, _, _, _, sessions, _)| {
+        serde_json::to_value(sessions.get(&"s".to_string()) as Option<crate::pipeline::SessStats>)
+            .unwrap()
+    })
+}
+
+/// The digest is read off mechanical events, and folds to the same row
+/// whatever the order or batching of its inputs.
+#[test]
+fn session_digest_is_mechanical_and_order_independent() {
+    let evs = sess_events();
+    let mut one = open(tmp());
+    one.wtx(|tx| {
+        for (id, e) in &evs {
+            tx.upsert(id, e);
+        }
+    });
+    let mut each = open(tmp());
+    for (id, e) in evs.iter().rev() {
+        each.wtx(|tx| tx.upsert(id, e));
+    }
+    let row = sess_row(&one);
+    assert_eq!(row, sess_row(&each), "fold order leaked into the digest");
+    assert_eq!(row["intent"], "build the session digest");
+    assert_eq!(row["intent_at"], serde_json::json!([20, 17]));
+    assert_eq!(
+        (&row["tools"], &row["commands"], &row["fails"]),
+        (&6.into(), &5.into(), &4.into())
+    );
+    let fails: Vec<&str> = row["first_fails"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f[2].as_str().unwrap())
+        .collect();
+    assert_eq!(fails, ["Bash-33", "exec_command-48", "Bash-49"]);
+    assert_eq!(
+        row["files"],
+        serde_json::json!({"/desk/src/a.rs": 2, "/desk/src/b.rs": 1})
+    );
+
+    // a re-capture that learns a call failed revises it in place: counted
+    // once, listed once
+    let mut st = open(tmp());
+    let ok = tool("s", 7, 1, true);
+    st.wtx(|tx| tx.upsert(&ok.0, &ok.1));
+    let failed = tool("s", 7, 1, false);
+    st.wtx(|tx| tx.upsert(&failed.0, &failed.1));
+    st.wtx(|tx| tx.upsert(&failed.0, &failed.1));
+    let row = sess_row(&st);
+    assert_eq!((&row["tools"], &row["fails"]), (&1.into(), &1.into()));
+    assert_eq!(row["first_fails"].as_array().unwrap().len(), 1);
+    // a failed call revised with a new detail replaces its listing
+    let retried = (
+        failed.0.clone(),
+        Envelope::new(
+            "s",
+            1,
+            Event::ToolCall {
+                tool: "Bash".into(),
+                detail: "retried".into(),
+                ok: false,
+            },
+        ),
+    );
+    st.wtx(|tx| tx.upsert(&retried.0, &retried.1));
+    let row = sess_row(&st);
+    assert_eq!(row["fails"], 1);
+    assert_eq!(row["first_fails"], serde_json::json!([[1, 7, "retried"]]));
+    // a touch revised to another path leaves no zero-count ghost
+    let touch = |p: &str| {
+        (
+            ("s".to_string(), 15),
+            Envelope::new("s", 2, Event::FileTouch { path: p.into() }),
+        )
+    };
+    let (id, e) = touch("/desk/a.rs");
+    st.wtx(|tx| tx.upsert(&id, &e));
+    let (id, e) = touch("/desk/b.rs");
+    st.wtx(|tx| tx.upsert(&id, &e));
+    assert_eq!(sess_row(&st)["files"], serde_json::json!({"/desk/b.rs": 1}));
 }

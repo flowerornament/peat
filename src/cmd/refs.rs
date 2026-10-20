@@ -12,6 +12,7 @@ use std::path::Path;
 use crate::db::Db;
 use crate::event::EventId;
 use crate::pipeline::{SessStats, TextRow};
+use crate::transcript::persons_words;
 use crate::ui::{self, age_label, clip, short_sess};
 use crate::vcs;
 
@@ -227,30 +228,6 @@ fn said_before(rows: &[(EventId, TextRow)], session: &str, at: u64) -> Vec<Line>
         .collect();
     out.reverse();
     out
-}
-
-/// The person's own words in a user-role message, or `None` when a
-/// harness or another agent put it there (tags, hail envelopes, system
-/// notices). A skill invocation is the harness's text with the person's
-/// words in its trailing `ARGUMENTS:` line; those words are kept.
-fn persons_words(text: &str) -> Option<String> {
-    let t = text.trim_start();
-    // a slash command: the harness wraps the person's words in tags
-    if let Some((_, rest)) = t.split_once("<command-args>") {
-        let args = rest.split("</command-args>").next().unwrap_or("").trim();
-        return (!args.is_empty()).then(|| args.to_string());
-    }
-    if t.starts_with("Base directory for this skill") {
-        return t
-            .rsplit_once("ARGUMENTS:")
-            .map(|(_, a)| a.trim().to_string())
-            .filter(|a| !a.is_empty());
-    }
-    let harness = t.starts_with('<')
-        || t.starts_with("[hail ")
-        || t.starts_with("[SYSTEM")
-        || t.starts_with("Caveat:");
-    (!harness).then(|| text.to_string())
 }
 
 /// What the agent said first at or after `at`: its account of the change.
@@ -511,30 +488,5 @@ mod tests {
             .collect();
         assert_eq!(got, vec!["b", "c"]);
         assert!(said_before(&rows, "other", 45).is_empty());
-    }
-
-    #[test]
-    fn only_the_persons_words_count() {
-        assert_eq!(
-            persons_words("fix the gate").as_deref(),
-            Some("fix the gate")
-        );
-        assert_eq!(
-            persons_words("Base directory for this skill: /x\n# T\nARGUMENTS: move peat onto jj")
-                .as_deref(),
-            Some("move peat onto jj")
-        );
-        assert_eq!(
-            persons_words("<command-name>/template</command-name>\n<command-args>move peat onto jj</command-args>")
-                .as_deref(),
-            Some("move peat onto jj")
-        );
-        for h in [
-            "Base directory for this skill: /x\nno args",
-            "<task-notification>x",
-            "[hail kind:fyi] x",
-        ] {
-            assert_eq!(persons_words(h), None, "{h}");
-        }
     }
 }

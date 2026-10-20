@@ -272,6 +272,34 @@ pub fn sessions_for(change: &Change, sessions: &[(String, SessionSpan)]) -> Vec<
     hits.into_iter().map(|(id, _, b)| (id.clone(), b)).collect()
 }
 
+/// The commits whose `Session:` trailer names `session` (the trailer may
+/// be a prefix of the id, as in [`sessions_for`]), newest first, at most
+/// `LOOKUP_CAP`, plus whether the cap cut them. jj's description search
+/// only nominates; the parsed trailer decides, so a body line that merely
+/// mentions the id never counts. `Err` outside a jj repo or without jj.
+pub fn session_commits(repo_dir: &Path, session: &str) -> Result<(Vec<Change>, bool), String> {
+    if !is_ident(session) {
+        return Ok((Vec::new(), false));
+    }
+    // nominate on the id's 8-char head, so a trailer carrying a prefix of
+    // the id is found too (jj-identity stamps the full id)
+    let head: String = session.chars().take(8).collect();
+    let (found, cut) = lookup_bounded(
+        repo_dir,
+        &format!("description(substring:\"Session: {head}\")"),
+    )?;
+    let mine = found
+        .into_iter()
+        .filter(|c| {
+            c.trailers
+                .session
+                .as_deref()
+                .is_some_and(|t| session.starts_with(t))
+        })
+        .collect();
+    Ok((mine, cut))
+}
+
 fn last_component(cwd: &str) -> Option<&str> {
     cwd.trim_end_matches('/')
         .rsplit('/')

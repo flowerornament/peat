@@ -20,6 +20,7 @@ use fold::pipeline::terminal::{
 use fold::pipeline::{Aggregate, FilterMap, Map};
 
 use crate::event::{Basis, Envelope, Event, EventId};
+use crate::transcript::persons_words;
 
 pub const DAY_MS: u64 = 86_400_000;
 
@@ -85,7 +86,10 @@ pub struct SubjStats {
     pub basis: Option<Basis>,
 }
 
-/// One session's summary row.
+/// One session's summary row, and its digest: what the person asked, what
+/// ran, what failed, which files changed — all read off mechanical events,
+/// no model. Commits are not here: they are read from jj trailers at render
+/// time (`vcs::session_commits`), never folded or guessed.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SessStats {
     pub start_ms: u64,
@@ -93,7 +97,37 @@ pub struct SessStats {
     pub final_msg: String,
     pub cwd: String,
     pub branch: String,
+    /// retired `Commit` events only (recorded before 0.5.0)
     pub commits: i64,
+    /// the person's first own words, capped at [`INTENT_CAP`]; the whole
+    /// message is `peat <session> <intent_at.1>`
+    pub intent: String,
+    /// `(ts_ms, seq)` of the intent message; the earliest wins, so the fold
+    /// is independent of drain order
+    pub intent_at: Option<(u64, u32)>,
+    pub tools: i64,
+    /// shell commands among `tools`
+    pub commands: i64,
+    pub fails: i64,
+    /// the earliest [`FAILS_KEPT`] failed calls as `(ts_ms, seq, detail)`,
+    /// oldest first; `peat events --session <s> --kind tool` lists them all
+    pub first_fails: Vec<(u64, u32, String)>,
+    /// path -> touch count, sorted so folds are iteration-order independent;
+    /// unbounded on purpose — cross-seat overlap reads the whole set
+    pub files: std::collections::BTreeMap<String, i64>,
+}
+
+/// Bytes of the intent kept in the session row (the ledger keeps it all).
+pub const INTENT_CAP: usize = 500;
+/// Failed calls whose detail the session row keeps.
+pub const FAILS_KEPT: usize = 3;
+
+/// Tool names that run a shell command, across harnesses.
+pub fn is_command(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Bash" | "exec_command" | "shell" | "shell_command" | "local_shell"
+    )
 }
 
 /// Text indexed for recall, with the disposition the brief must show.
@@ -171,6 +205,11 @@ pub fn embeddable(t: &Keyed<EventId, TextRow>) -> Option<Keyed<EventId, [f32; es
     embed.then(|| Keyed::new(t.key.clone(), ese::encode_single(&t.val.text)))
 }
 
+/// The text rows recall searches. A user message is indexed as the
+/// person's own words only ([`persons_words`]): system reminders, hail
+/// envelopes and skill bodies arrive in the user role but are not what
+/// anyone said, and searching them returns the harness. The ledger keeps
+/// the raw message; `peat <session> <seq>` reads it.
 pub fn searchable(k: &Keyed<EventId, Envelope>) -> Option<Keyed<EventId, TextRow>> {
     let e = &k.val;
     let (text, kind, cited) = match &e.kind {
@@ -179,11 +218,11 @@ pub fn searchable(k: &Keyed<EventId, Envelope>) -> Option<Keyed<EventId, TextRow
         }
         | Event::Obs2 {
             text, derived_from, ..
-        } => (text, "obs", !derived_from.is_empty()),
-        Event::FinalMsg { text } => (text, "final", true),
-        Event::Said { text } => (text, "said", true),
-        Event::CompactSummary { text } => (text, "compact", true),
-        Event::UserMsg { text } => (text, "user", true),
+        } => (text.clone(), "obs", !derived_from.is_empty()),
+        Event::FinalMsg { text } => (text.clone(), "final", true),
+        Event::Said { text } => (text.clone(), "said", true),
+        Event::CompactSummary { text } => (text.clone(), "compact", true),
+        Event::UserMsg { text } => (persons_words(text)?, "user", true),
         _ => return None,
     };
     if text.trim().is_empty() {
@@ -192,7 +231,7 @@ pub fn searchable(k: &Keyed<EventId, Envelope>) -> Option<Keyed<EventId, TextRow
     Some(Keyed::new(
         k.key.clone(),
         TextRow {
-            text: text.clone(),
+            text,
             kind: kind.to_string(),
             ts_ms: e.ts_ms,
             cited,
@@ -246,20 +285,31 @@ pub fn subj_step(acc: &mut SubjStats, v: &ObsRow, delta: isize) {
     }
 }
 
-pub fn sess_row(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, Envelope>> {
+/// One session event with its seq — the digest's tie-break and handle.
+pub type SessEv = (u32, Envelope);
+
+pub fn sess_row(k: &Keyed<EventId, Envelope>) -> Option<Keyed<String, SessEv>> {
     match &k.val.kind {
         Event::SessionMeta { .. }
         | Event::FinalMsg { .. }
         | Event::Commit { .. }
-        | Event::ToolCall { .. } => Some(Keyed::new(k.val.session.clone(), k.val.clone())),
+        | Event::ToolCall { .. }
+        | Event::FileTouch { .. }
+        | Event::UserMsg { .. } => {
+            Some(Keyed::new(k.val.session.clone(), (k.key.1, k.val.clone())))
+        }
         _ => None,
     }
 }
 
 /// Same declared asymmetry as [`subj_step`]: retraction adjusts counts but
-/// does not un-derive `final_msg`/`cwd`; peat's write paths never bare-remove.
-pub fn sess_step(acc: &mut SessStats, e: &Envelope, delta: isize) {
+/// does not un-derive `final_msg`/`cwd`/`intent`, nor recover a fail pushed
+/// out of `first_fails`; peat's write paths never bare-remove. Every
+/// insert commutes: the earliest `(ts, seq)` wins the intent, the fail list
+/// is the earliest k, and the rest are counts.
+pub fn sess_step(acc: &mut SessStats, (seq, e): &SessEv, delta: isize) {
     let d = delta as i64;
+    let at = (e.ts_ms, *seq);
     if delta > 0 {
         if acc.start_ms == 0 || e.ts_ms < acc.start_ms {
             acc.start_ms = e.ts_ms;
@@ -275,6 +325,33 @@ pub fn sess_step(acc: &mut SessStats, e: &Envelope, delta: isize) {
         }
         Event::FinalMsg { text } if delta > 0 => acc.final_msg = text.clone(),
         Event::Commit { .. } => acc.commits += d,
+        Event::UserMsg { text } if delta > 0 && acc.intent_at.is_none_or(|w| at < w) => {
+            if let Some(words) = persons_words(text) {
+                acc.intent = crate::event::cap(&words, INTENT_CAP);
+                acc.intent_at = Some(at);
+            }
+        }
+        Event::ToolCall { tool, detail, ok } => {
+            acc.tools += d;
+            acc.commands += d * i64::from(is_command(tool));
+            if !ok {
+                acc.fails += d;
+                // a revision re-inserts the same (ts, seq): replace, never twin
+                acc.first_fails.retain(|(ts, s, _)| (*ts, *s) != at);
+                if delta > 0 {
+                    acc.first_fails.push((at.0, at.1, detail.clone()));
+                    acc.first_fails.sort();
+                    acc.first_fails.truncate(FAILS_KEPT);
+                }
+            }
+        }
+        Event::FileTouch { path } => {
+            let n = acc.files.entry(path.clone()).or_default();
+            *n += d;
+            if *n <= 0 {
+                acc.files.remove(path);
+            }
+        }
         _ => {}
     }
 }
@@ -349,16 +426,16 @@ pub type Pipeline = (
         Keyed<String, ObsRow>,
     >,
     FilterMap<
-        fn(&In) -> Option<Keyed<String, Envelope>>,
+        fn(&In) -> Option<Keyed<String, SessEv>>,
         Aggregate<
             String,
-            Envelope,
+            SessEv,
             SessStats,
-            fn(&mut SessStats, &Envelope, isize),
+            fn(&mut SessStats, &SessEv, isize),
             Table<String, SessStats>,
         >,
         In,
-        Keyed<String, Envelope>,
+        Keyed<String, SessEv>,
     >,
     Table<EventId, Envelope>,
 );

@@ -152,6 +152,9 @@ pub enum Cmd {
         /// Session id (prefix ok)
         session: String,
         seq: Option<u32>,
+        /// The overview's full digest (the API form; never clipped)
+        #[arg(long)]
+        json: bool,
     },
     /// One window of time (what `peat <window>` runs): digest, children
     /// one rung finer, and what was said inside it

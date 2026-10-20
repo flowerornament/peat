@@ -164,6 +164,47 @@ pub fn current_session(explicit: Option<String>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Variables Codex sets on each process it runs (seen in the codex 0.163
+/// binary). User-level settings such as `CODEX_HOME` are not evidence: a
+/// person may export them in every shell, Claude sessions included.
+const CODEX_PROCESS_VARS: &[&str] = &[
+    "CODEX_THREAD_ID",
+    "CODEX_TOOL_CALL_ID",
+    "CODEX_SANDBOX",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+];
+
+/// The session running this process, on exact evidence only: the id the
+/// harness put in our environment. `current-session` is not evidence —
+/// several seats share it and the last writer wins. A variable Codex sets
+/// on the processes it runs ([`CODEX_PROCESS_VARS`]) means we run under
+/// Codex, where an inherited `CLAUDE_CODE_SESSION_ID` (a codex started from
+/// a Claude pane) is never trusted; `CODEX_THREAD_ID` (its rollout id) is
+/// the id when present. `vars` is the environment, so tests pass pairs
+/// instead of mutating the process.
+pub fn calling_session(vars: impl IntoIterator<Item = (String, String)>) -> Option<String> {
+    let (mut codex, mut thread, mut claude) = (false, None, None);
+    for (k, v) in vars {
+        let v = Some(v.trim().to_string()).filter(|v| !v.is_empty());
+        match k.as_str() {
+            "CODEX_THREAD_ID" => thread = v,
+            "CLAUDE_CODE_SESSION_ID" => claude = v,
+            _ => {}
+        }
+        codex |= CODEX_PROCESS_VARS.contains(&k.as_str());
+    }
+    if codex { thread } else { claude }
+}
+
+/// [`calling_session`] over the process environment.
+pub fn calling_session_env() -> Option<String> {
+    // vars_os: a non-UTF-8 variable must not panic a read
+    calling_session(
+        std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))),
+    )
+}
+
 /// Restores the process panic hook when dropped, whichever way the open
 /// loop exits — the hook is muted during retries because `catch_unwind`
 /// does not silence it, and a caught-and-retried lock conflict must not
@@ -298,8 +339,10 @@ pub fn now_ms() -> u64 {
 ///
 /// History: 1 = v0.1.x shapes (implicit — no marker file);
 /// 2 = `ObsRow`/`SubjStats` carry the deposit-time `Basis`;
-/// 3 = the `days` view is keyed by quarter-hour slot, not UTC day.
-pub const VIEW_VERSION: u32 = 3;
+/// 3 = the `days` view is keyed by quarter-hour slot, not UTC day;
+/// 4 = `SessStats` carries the session digest, and user text rows index
+/// the person's own words only.
+pub const VIEW_VERSION: u32 = 4;
 
 /// A path beside the db dir: `.peat/db` → `.peat/db<suffix>`.
 pub fn beside(db: &std::path::Path, suffix: &str) -> PathBuf {

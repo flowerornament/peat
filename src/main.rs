@@ -158,6 +158,7 @@ fn main() {
                 Cmd::Show {
                     session: q[0].clone(),
                     seq: q.get(1).and_then(|s| s.parse().ok()),
+                    json: cli.json,
                 }
             } else if q.len() == 1
                 && st.rtx(|(_, _, _, (subjects, _), _, _)| subjects.get(&q[0]).is_some())
@@ -215,6 +216,7 @@ fn main() {
                 *offset_ms,
                 brief::budget(budget),
                 &brief::desk(),
+                db::calling_session_env(),
             );
             brief::emit(&b, json);
         }
@@ -224,10 +226,18 @@ fn main() {
             filter,
             subject,
             json,
-        } => cmd::recall::recall(&st, query, limit, filter, subject, json),
+        } => cmd::recall::recall(
+            &st,
+            query,
+            limit,
+            filter,
+            subject,
+            db::calling_session_env(),
+            json,
+        ),
         Cmd::Events { filter, json } => cmd::events::events(&st, filter, json),
         Cmd::Subjects { json } => cmd::recall::subjects(&st, json),
-        Cmd::Show { session, seq } => cmd::show::show(&st, session, seq),
+        Cmd::Show { session, seq, json } => cmd::show::show(&st, session, seq, json),
         Cmd::Zoom { window, json } => cmd::zoom::zoom(&st, window, json, db::now_ms(), *offset_ms),
         Cmd::Ref { target, json } => {
             let desk = brief::desk();

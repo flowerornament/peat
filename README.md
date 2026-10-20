@@ -71,7 +71,7 @@ Event kinds, in trust order:
 | kind             | source                                                                                                 | indexed                                        |
 | ---------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
 | `SessionMeta`    | transcript                                                                                             | — (pins cwd, branch, and ese model provenance) |
-| `UserMsg`        | transcript                                                                                             | BM25                                           |
+| `UserMsg`        | transcript                                                                                             | BM25, the person's own words only              |
 | `ToolCall`       | transcript                                                                                             | — (day counts)                                 |
 | `FileTouch`      | Edit/Write tool calls                                                                                  | file↔session index                             |
 | `Said`           | substantive mid-session assistant messages (v2)                                                        | BM25                                           |
@@ -184,9 +184,13 @@ One window's counts, its children one rung finer (year → months → weeks → 
 
 Hybrid BM25 ⊕ exact-scan vector recall with RRF fusion. Filters: `--kind obs|said|user|final|compact`, `--since <days>`, `--session <prefix>`, `--limit N`, or `--subject <name>` to read one subject's full evidence trail instead of searching. `peat <words>` is the short form.
 
+A `user` hit is the person's own words. Harness text that arrives in the user role is not indexed: system reminders, task and sub-agent notifications, Codex context blocks, skill bodies, slash-command wrappers (a command's arguments are kept), and hail or tmux-bridge envelopes. A harness block in front of typed text is stripped and the text kept; an envelope that landed mid-message is cut along with what follows it; an attached image keeps its typed text; any tag the person wrote themselves (`<feedback>`, `<ctx>`, …) stays. The ledger keeps every message raw; `peat <session> <seq>` reads it. Hits from the session running the search rank after every other session's and are marked `· this session` (`"calling_session": true` in `--json`): they are earlier turns of that session, which a sub-agent sharing its coordinator's id does not hold, so they are demoted, never dropped. The session is named only by exact evidence: `CODEX_THREAD_ID` under Codex (any `CODEX_*` variable means Codex, where an inherited `CLAUDE_CODE_SESSION_ID` is ignored), else `CLAUDE_CODE_SESSION_ID`. The brief's `relevant` section follows the same rule.
+
 ### `peat show <session> [seq]` / `peat events`
 
 One session's overview, or one event in full with the observations citing it; the raw ledger oldest-first (auto-paged through `less -RFX` on a terminal). Both take `--json`.
+
+The overview is a digest computed without a model: what the person first asked (their own words), tool calls, shell commands and failures (the first three failing commands), the files it edited with touch counts, its commits, its closing message and its observations. Commits are read from jj at display time by the `Session:` trailer, in the session's repo while it exists, else in the current repo only when the session ran in one of its workspaces; they are never folded or guessed, and where jj cannot answer for the session's repo the section is absent (`"commits": null`, never a confident `[]`). The text form clips (eight files, three failures), each clipped list ending in its handle; `--json` lists every edited file.
 
 ### `peat asof <YYYY-MM-DD> [task words…]` — time travel
 
