@@ -14,8 +14,9 @@
 //! `pipeline` (the fold graph, a named type), `transcript` (harness
 //! transcripts → events, plus civil-date math), `db` (paths, opening, view
 //! migration, checkpoint policy), `brief` and `ladder` (orientation),
-//! `hook` (the one harness verb), `cli` (flags) and `cmd` (one module per
-//! verb). This file parses and dispatches.
+//! `hook` (the one harness verb), `install` (wiring the harness configs,
+//! `peat init`), `cli` (flags) and `cmd` (one module per verb). This file
+//! parses and dispatches.
 
 pub mod brief;
 pub mod cli;
@@ -23,6 +24,7 @@ mod cmd;
 pub mod db;
 pub mod event;
 mod hook;
+mod install;
 pub mod ladder;
 pub mod pipeline;
 pub mod transcript;
@@ -51,6 +53,8 @@ fn main() {
         Some(Cmd::Hook {
             cmd:
                 Some(HookCmd::Install {
+                    project,
+                    strip_project,
                     codex,
                     local,
                     check,
@@ -59,15 +63,19 @@ fn main() {
             ..
         }) => {
             let fabric = match (codex, local) {
-                (true, _) => hook::Fabric::Codex,
-                (_, true) => hook::Fabric::ClaudeLocal,
-                _ => hook::Fabric::Claude,
+                (true, _) => install::Fabric::Codex,
+                (_, true) => install::Fabric::ClaudeLocal,
+                _ => install::Fabric::Claude,
             };
-            hook::install_cli(fabric, check, print);
+            install::install_cli(project.then_some(fabric), strip_project, check, print);
             return;
         }
         Some(Cmd::Skill) => {
-            print!("{}", hook::SKILL);
+            print!("{}", install::SKILL);
+            return;
+        }
+        Some(Cmd::Init) => {
+            install::init_cli();
             return;
         }
         Some(Cmd::Hook { event, cmd: None }) => match hook::run(event) {
@@ -75,13 +83,17 @@ fn main() {
                 // a busy ledger skips the brief silently, never the session
                 let _ = db::LOCK_WAIT_SECS.set(15);
                 let _ = db::LOCK_FAIL_FALLBACK.set(brief::LOOKUP_LINE.to_string());
-                let st = db::open_db(db::db_path());
-                ui::out(&brief::agent(
-                    &st,
-                    &brief::desk(),
-                    session.as_deref(),
-                    db::now_ms(),
-                ));
+                // and a hook never exits non-zero: a panic anywhere in the
+                // open (a view rebuild, a corrupt store) degrades to the
+                // fallback line, like a busy ledger
+                let brief = std::panic::catch_unwind(|| {
+                    let st = db::open_db(db::db_path());
+                    brief::agent(&st, &brief::desk(), session.as_deref(), db::now_ms())
+                });
+                match brief {
+                    Ok(b) => ui::out(&b),
+                    Err(_) => db::bail(0),
+                }
                 return;
             }
             _ => return,
@@ -89,7 +101,17 @@ fn main() {
         _ => cli,
     };
 
-    let mut st = db::open_db(db::db_path());
+    // a ledger comes to exist only by `peat init` (or an explicit
+    // PEAT_DB): a read in a repo that never opted in must not opt it in
+    let path = db::db_path();
+    if std::env::var_os("PEAT_DB").is_none() && !path.is_dir() {
+        ui::error(&format!(
+            "no ledger here ({}) — run `peat init` to opt this repo in",
+            path.display()
+        ));
+        std::process::exit(1);
+    }
+    let mut st = db::open_db(path);
     // the reader's UTC offset: what "a day" means on every reading surface
     // (render boundary only — the fold buckets UTC quarter-hours)
     let offset_ms = std::cell::LazyCell::new(transcript::local_offset_ms);
@@ -216,7 +238,9 @@ fn main() {
         }
         Cmd::Compact => cmd::capture::compact(&mut st),
         Cmd::Asof { date, task, json } => cmd::asof::asof(st, date, task, json),
-        Cmd::Hook { .. } | Cmd::Skill => unreachable!("handled before the ledger opens"),
+        Cmd::Hook { .. } | Cmd::Skill | Cmd::Init => {
+            unreachable!("handled before the ledger opens")
+        }
     }
 }
 

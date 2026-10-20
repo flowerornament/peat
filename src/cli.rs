@@ -183,9 +183,14 @@ pub enum Cmd {
         json: bool,
     },
     /// Print the peat skill (when to look things up, how far to trust a
-    /// line). `peat hook install` lays it beside the hooks where the
-    /// harness discovers it
+    /// line). `peat hook install --project` lays it beside the per-repo
+    /// hooks where the harness discovers it
     Skill,
+    /// Opt this repo in: create its ledger (`.peat/db` at the repo root;
+    /// in a jj workspace or git worktree, the anchor repo's, which every
+    /// desk shares). Idempotent. The user-level hook records only where a
+    /// ledger exists
+    Init,
     /// The one command every harness hook runs. Reads the hook's stdin
     /// JSON and dispatches on hook_event_name, never failing the session:
     /// SessionStart → the agent brief (+ session id); Stop / PreCompact /
@@ -201,20 +206,33 @@ pub enum Cmd {
 
 #[derive(clap::Subcommand)]
 pub enum HookCmd {
-    /// Wire `peat hook` into .claude/settings.json (or .codex/hooks.json)
-    /// at the desk root and lay the peat skill beside it — merges, keeps
-    /// other hooks, replaces any copied peat bash snippets, idempotent
+    /// Wire `peat hook` once per machine: every Claude Code config dir
+    /// (~/.claude, $CLAUDE_CONFIG_DIR, live ~/.claude-* dirs) and Codex's
+    /// ~/.codex/config.toml (or $CODEX_HOME). Merges, keeps other tools'
+    /// hooks and settings, removes peat from retired events, idempotent.
+    /// Also removes peat from the current repo's untracked hook files,
+    /// which fire a second time beside the user-level hook (tracked ones
+    /// are reported; see --strip-project)
     Install {
-        /// Target Codex (.codex/hooks.json) instead of Claude Code
-        #[arg(long, conflicts_with = "local")]
+        /// The per-repo form instead: .claude/settings.json at the desk
+        /// root plus the skill and the ledger, for a repo shared with
+        /// people who lack the user-level hook
+        #[arg(long)]
+        project: bool,
+        /// Also remove peat from the current repo's tracked hook files
+        /// (.claude/settings.json, …), which install otherwise only reports
+        #[arg(long, conflicts_with = "project")]
+        strip_project: bool,
+        /// With --project: Codex (.codex/hooks.json) instead of Claude Code
+        #[arg(long, requires = "project", conflicts_with = "local")]
         codex: bool,
-        /// Target Claude Code's git-ignored .claude/settings.local.json
-        #[arg(long)]
+        /// With --project: Claude Code's git-ignored .claude/settings.local.json
+        #[arg(long, requires = "project")]
         local: bool,
-        /// Report whether the hooks are installed; exit 1 if not
-        #[arg(long)]
+        /// Report drift per file without writing; exit 1 on any
+        #[arg(long, conflicts_with = "print")]
         check: bool,
-        /// Print the snippet instead of writing it
+        /// Print what each file would receive instead of writing it
         #[arg(long)]
         print: bool,
     },

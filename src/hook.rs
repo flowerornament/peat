@@ -14,39 +14,6 @@ use std::path::{Path, PathBuf};
 
 use crate::db;
 
-/// Which harness wrote the config we are installing into.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Fabric {
-    Claude,
-    /// Claude Code's per-user, git-ignored settings layer.
-    ClaudeLocal,
-    Codex,
-}
-
-impl Fabric {
-    /// The project-relative config file each harness reads hooks from.
-    pub fn config_path(self) -> &'static str {
-        match self {
-            Fabric::Claude => ".claude/settings.json",
-            Fabric::ClaudeLocal => ".claude/settings.local.json",
-            Fabric::Codex => ".codex/hooks.json",
-        }
-    }
-    pub fn name(self) -> &'static str {
-        match self {
-            Fabric::Claude | Fabric::ClaudeLocal => "claude",
-            Fabric::Codex => "codex",
-        }
-    }
-    fn install_flag(self) -> &'static str {
-        match self {
-            Fabric::Claude => "",
-            Fabric::ClaudeLocal => " --local",
-            Fabric::Codex => " --codex",
-        }
-    }
-}
-
 /// The moments peat covers, in the harness's spelling: brief at the
 /// start, capture at every way a stretch of work can end. Events peat used
 /// to wire (UserPromptSubmit for push, PostToolUse for the commit nudge)
@@ -59,6 +26,8 @@ pub const EVENTS: [&str; 4] = ["SessionStart", "Stop", "PreCompact", "SessionEnd
 pub struct Input {
     pub event: String,
     pub session_id: Option<String>,
+    /// Why a SessionStart fired: `startup`, `resume`, `clear`, `compact`.
+    pub source: Option<String>,
     pub transcript_path: Option<String>,
     pub last_assistant_message: Option<String>,
 }
@@ -70,6 +39,7 @@ impl Input {
         Input {
             event: s("hook_event_name").unwrap_or_default(),
             session_id: s("session_id").filter(|x| !x.is_empty()),
+            source: s("source").filter(|x| !x.is_empty()),
             transcript_path: s("transcript_path").filter(|x| !x.is_empty()),
             last_assistant_message: s("last_assistant_message").filter(|x| !x.trim().is_empty()),
         }
@@ -154,12 +124,94 @@ fn codex_rollout(session: &str) -> Option<PathBuf> {
 /// through a redirect / worktree anchor), and no `.peat/off` marker may
 /// be present beside the desk or beside the ledger — the pause switch.
 pub fn enabled() -> bool {
-    let db = db::db_path();
-    if !db.is_dir() {
+    db::db_path().is_dir() && !paused()
+}
+
+/// Is a `.peat/off` marker present beside the desk or beside the ledger?
+pub fn paused() -> bool {
+    let off = |dir: Option<&Path>| dir.is_some_and(|d| d.join("off").exists());
+    off(Some(&db::peat_dir())) || off(db::db_path().parent())
+}
+
+/// How close together two identical SessionStarts must fire to be one
+/// moment wired twice (a user-level hook plus a leftover project copy)
+/// rather than two moments (a later resume or compaction).
+pub const DUP_WINDOW_MS: u64 = 10_000;
+
+/// Markers older than this are swept; they only need to outlive a window.
+const MARKER_TTL_MS: u64 = 3_600_000;
+
+/// Is this the first time this exact moment fired? Keyed by `key` in
+/// `dir`, one file per moment holding the time it last fired. Hooks wired
+/// twice run concurrently, so the read-decide-write runs under an
+/// exclusive lock on the marker itself: of two invocations within
+/// [`DUP_WINDOW_MS`], exactly one sees `true`. Any filesystem failure
+/// answers `true` — a duplicate brief is better than none.
+///
+/// `now_ms` is the wall clock, read here at the capture boundary, never
+/// in a fold path.
+pub fn first_fire(dir: &Path, key: &str, now_ms: u64) -> bool {
+    use std::io::{Read, Seek, Write};
+    if std::fs::create_dir_all(dir).is_err() {
+        return true;
+    }
+    // sweep markers of moments long past (best effort; a marker swept
+    // while another process holds it costs at most one duplicate brief)
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|t| now_ms.saturating_sub(t.as_millis() as u64) > MARKER_TTL_MS);
+        if old && e.file_name() != key {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(key))
+    else {
+        return true;
+    };
+    if f.lock().is_err() {
+        return true;
+    }
+    let mut text = String::new();
+    let _ = f.read_to_string(&mut text);
+    let last: Option<u64> = text.trim().parse().ok();
+    if last.is_some_and(|t| now_ms.saturating_sub(t) < DUP_WINDOW_MS) {
         return false;
     }
-    let off = |dir: Option<&Path>| dir.is_some_and(|d| d.join("off").exists());
-    !(off(Some(&db::peat_dir())) || off(db.parent()))
+    let _ = f.set_len(0);
+    let _ = f.rewind();
+    let _ = write!(f, "{now_ms}");
+    true
+}
+
+/// The marker name for one SessionStart: session, event and source, made
+/// filename-safe.
+fn fire_key(input: &Input) -> Option<String> {
+    let sid = input.session_id.as_deref()?;
+    let raw = format!(
+        "{sid}.{}.{}",
+        input.event,
+        input.source.as_deref().unwrap_or("-")
+    );
+    Some(
+        raw.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Spawn `peat <args>` in its own process group with all stdio closed,
@@ -195,10 +247,16 @@ pub fn run(event_override: Option<String>) -> Action {
     let action = plan(&input);
     match &action {
         Action::Brief { .. } => {
+            let dir = db::peat_dir();
             if let Some(sid) = &input.session_id {
-                let dir = db::peat_dir();
-                let _ = std::fs::create_dir_all(&dir);
+                db::ensure_ignored_dir(&dir);
                 let _ = std::fs::write(dir.join("current-session"), sid);
+            }
+            // the same moment wired twice briefs once
+            if let Some(key) = fire_key(&input)
+                && !first_fire(&dir.join("fired"), &key, db::now_ms())
+            {
+                return Action::Nothing;
             }
         }
         Action::Capture {
@@ -218,269 +276,6 @@ fn detach_capture(transcript: &Path, final_msg: Option<&str>) {
         args.extend(["--final-msg".as_ref(), std::ffi::OsStr::new(m)]);
     }
     detach(&args);
-}
-
-// ---- install ---------------------------------------------------------
-
-/// `peat hook install`: wire the hooks and lay the skill at the desk root
-/// (the directory holding `.peat`). Creates the ledger when the desk has
-/// none, because `peat hook` is a no-op without one.
-pub fn install_cli(fabric: Fabric, check: bool, print: bool) {
-    if print {
-        println!("{}", serde_json::to_string_pretty(&snippet()).unwrap());
-        return;
-    }
-    let root = db::peat_dir()
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
-    if !check {
-        drop(db::open_db(db::db_path()));
-    }
-    let skill = install_skill(&root, fabric, check);
-    match install(&root, fabric, check).and_then(|h| skill.map(|s| (h, s))) {
-        Ok((line, skill_line)) => {
-            println!("{line}");
-            println!("{skill_line}");
-            if !check {
-                println!("  {} hook on: {}", fabric.name(), EVENTS.join(", "));
-                if fabric == Fabric::Codex {
-                    println!(
-                        "  Codex runs no hook until it is trusted: open /hooks in the Codex CLI and trust it"
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            crate::ui::error(&e);
-            std::process::exit(1);
-        }
-    }
-}
-
-/// The peat skill: the judgment half (when to read, how to deposit, how
-/// far to trust a line), shipped inside the binary so `install` can lay
-/// it beside the hooks and `peat skill` can print it.
-pub const SKILL: &str = include_str!("../skills/peat/SKILL.md");
-
-/// Where each harness discovers project skills.
-pub fn skill_path(fabric: Fabric) -> &'static str {
-    match fabric {
-        Fabric::Claude | Fabric::ClaudeLocal => ".claude/skills/peat/SKILL.md",
-        Fabric::Codex => ".agents/skills/peat/SKILL.md",
-    }
-}
-
-/// Write the skill file; returns whether it changed. `check` only reports.
-pub fn install_skill(root: &Path, fabric: Fabric, check: bool) -> Result<String, String> {
-    let path = root.join(skill_path(fabric));
-    let current = std::fs::read_to_string(&path).ok();
-    if check {
-        return if current.as_deref() == Some(SKILL) {
-            Ok(format!("✓ {}: current", path.display()))
-        } else {
-            Err(format!(
-                "{}: missing or stale — run: peat hook install",
-                path.display()
-            ))
-        };
-    }
-    if current.as_deref() == Some(SKILL) {
-        return Ok(format!("= {}: already current", path.display()));
-    }
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    std::fs::write(&path, SKILL).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(format!("✓ {}: written", path.display()))
-}
-
-/// The hook entry every event gets.
-fn entry() -> serde_json::Value {
-    serde_json::json!({ "type": "command", "command": "peat hook" })
-}
-
-/// The full snippet for one fabric — what `--print` shows and what
-/// `install` merges in.
-pub fn snippet() -> serde_json::Value {
-    let mut hooks = serde_json::Map::new();
-    for ev in EVENTS {
-        let mut group = serde_json::Map::new();
-        group.insert("hooks".into(), serde_json::Value::Array(vec![entry()]));
-        hooks.insert(ev.into(), serde_json::Value::Array(vec![group.into()]));
-    }
-    serde_json::json!({ "hooks": hooks })
-}
-
-/// A hook command peat used to install by hand: anything invoking peat
-/// that is not the one-verb form. Removed on install so a project that
-/// copied the old snippet ends up with exactly one peat hook per event.
-fn is_legacy(cmd: &str) -> bool {
-    cmd != "peat hook" && (cmd.contains("peat ") || cmd.contains("/peat "))
-}
-
-/// Merge `peat hook` into an existing config value. Returns whether
-/// anything changed. Other keys and other tools' hooks are untouched.
-pub fn merge(
-    config: &mut serde_json::Value,
-    matcher_for: impl Fn(&str) -> Option<&'static str>,
-) -> bool {
-    if !config.is_object() {
-        *config = serde_json::json!({});
-    }
-    let root = config.as_object_mut().unwrap();
-    let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({}));
-    if !hooks.is_object() {
-        *hooks = serde_json::json!({});
-    }
-    let hooks = hooks.as_object_mut().unwrap();
-    let mut changed = false;
-    // events peat no longer uses (PostToolUse carried the commit nudge):
-    // drop every peat entry there, legacy snippet or one-verb, so an
-    // upgrade's install really removes what the release removed
-    let retired: Vec<String> = hooks
-        .keys()
-        .filter(|k| !EVENTS.contains(&k.as_str()))
-        .cloned()
-        .collect();
-    for ev in retired {
-        let Some(groups) = hooks.get_mut(&ev).and_then(|g| g.as_array_mut()) else {
-            continue;
-        };
-        for g in groups.iter_mut() {
-            if let Some(list) = g.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                let before = list.len();
-                list.retain(|h| {
-                    !h.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|c| c == "peat hook" || is_legacy(c))
-                });
-                changed |= list.len() != before;
-            }
-        }
-        let before = groups.len();
-        groups.retain(|g| {
-            g.get("hooks")
-                .and_then(|h| h.as_array())
-                .is_none_or(|l| !l.is_empty())
-        });
-        changed |= groups.len() != before;
-        if groups.is_empty() {
-            hooks.remove(&ev);
-            changed = true;
-        }
-    }
-    for ev in EVENTS {
-        let groups = hooks
-            .entry(ev)
-            .or_insert_with(|| serde_json::Value::Array(vec![]));
-        if !groups.is_array() {
-            *groups = serde_json::Value::Array(vec![]);
-        }
-        let groups = groups.as_array_mut().unwrap();
-        // strip legacy peat entries, then empty groups
-        for g in groups.iter_mut() {
-            if let Some(list) = g.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                let before = list.len();
-                list.retain(|h| {
-                    !h.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(is_legacy)
-                });
-                changed |= list.len() != before;
-            }
-        }
-        let before = groups.len();
-        groups.retain(|g| {
-            g.get("hooks")
-                .and_then(|h| h.as_array())
-                .is_none_or(|l| !l.is_empty())
-        });
-        changed |= groups.len() != before;
-        let present = groups.iter().any(|g| {
-            g.get("hooks")
-                .and_then(|h| h.as_array())
-                .is_some_and(|l| l.iter().any(|h| h == &entry()))
-        });
-        if !present {
-            let mut group = serde_json::Map::new();
-            if let Some(m) = matcher_for(ev) {
-                group.insert("matcher".into(), m.into());
-            }
-            group.insert("hooks".into(), serde_json::Value::Array(vec![entry()]));
-            groups.push(group.into());
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// Which events already carry the one-verb hook in this config.
-pub fn installed_events(config: &serde_json::Value) -> Vec<&'static str> {
-    EVENTS
-        .into_iter()
-        .filter(|ev| {
-            config
-                .get("hooks")
-                .and_then(|h| h.get(ev))
-                .and_then(|g| g.as_array())
-                .is_some_and(|groups| {
-                    groups.iter().any(|g| {
-                        g.get("hooks")
-                            .and_then(|h| h.as_array())
-                            .is_some_and(|l| l.iter().any(|h| h == &entry()))
-                    })
-                })
-        })
-        .collect()
-}
-
-/// Install (or check) the hooks for one fabric at the desk root. Returns
-/// a one-line report; `Err` carries the reason a check failed.
-pub fn install(root: &Path, fabric: Fabric, check: bool) -> Result<String, String> {
-    let path = root.join(fabric.config_path());
-    let mut config: serde_json::Value = match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).map_err(|e| {
-            format!(
-                "{}: not valid JSON ({e}); fix or move it first",
-                path.display()
-            )
-        })?,
-        Err(_) => serde_json::json!({}),
-    };
-    if check {
-        let have = installed_events(&config);
-        return if have.len() == EVENTS.len() {
-            Ok(format!(
-                "✓ {}: peat hook on all {} events",
-                path.display(),
-                EVENTS.len()
-            ))
-        } else {
-            let missing: Vec<_> = EVENTS.iter().filter(|e| !have.contains(e)).collect();
-            Err(format!(
-                "{}: peat hook missing on {} — run: peat hook install{}",
-                path.display(),
-                missing
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                fabric.install_flag()
-            ))
-        };
-    }
-    let changed = merge(&mut config, |_| None);
-    if changed {
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
-        let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-        std::fs::write(&path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(format!(
-            "✓ {}: peat hook on all {} events",
-            path.display(),
-            EVENTS.len()
-        ))
-    } else {
-        Ok(format!("= {}: already current", path.display()))
-    }
 }
 
 #[cfg(test)]
@@ -505,6 +300,51 @@ mod tests {
         assert_eq!(i.last_assistant_message.as_deref(), Some("done"));
         assert_eq!(i.transcript_path, None, "empty path is absent");
         assert_eq!(Input::parse("not json"), Input::default());
+    }
+
+    #[test]
+    fn first_fire_admits_one_of_concurrent_twins() {
+        let dir = std::env::temp_dir().join(format!("peat-fired-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for round in 0..20 {
+            let key = format!("s{round}.SessionStart.startup");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let admitted: usize = (0..4)
+                .map(|_| {
+                    let (dir, key, b) = (dir.clone(), key.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        b.wait();
+                        first_fire(&dir, &key, 1_000_000)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap() as usize)
+                .sum();
+            assert_eq!(admitted, 1, "round {round}");
+        }
+        let k = "s0.SessionStart.startup";
+        assert!(!first_fire(&dir, k, 1_000_000 + DUP_WINDOW_MS - 1));
+        assert!(
+            first_fire(&dir, k, 1_000_000 + DUP_WINDOW_MS),
+            "a later moment with the same key fires again"
+        );
+        assert!(first_fire(
+            &dir,
+            "s0.SessionStart.compact",
+            1_000_000 + DUP_WINDOW_MS
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fire_keys_are_filename_safe_and_need_a_session() {
+        let mut i = input("SessionStart");
+        i.session_id = Some("../a b".into());
+        i.source = Some("resume".into());
+        assert_eq!(fire_key(&i).as_deref(), Some(".._a_b.SessionStart.resume"));
+        i.session_id = None;
+        assert_eq!(fire_key(&i), None);
     }
 
     #[test]
@@ -542,87 +382,5 @@ mod tests {
         i.session_id = Some("no-such-session-anywhere".into());
         assert_eq!(plan(&i), Action::Nothing);
         assert_eq!(plan(&input("Whatever")), Action::Nothing);
-    }
-
-    #[test]
-    fn install_removes_peat_from_events_it_no_longer_uses() {
-        let mut cfg = serde_json::json!({
-            "hooks": {
-                "PostToolUse": [
-                    {"matcher": "Bash", "hooks": [{"type":"command","command":"in=$(cat); case \"$c\" in *git\\ commit*) echo '{\"additionalContext\":\"deposit peat obs\"}';; esac"}]},
-                    {"matcher": "Bash", "hooks": [{"type":"command","command":"peat hook"}]}
-                ],
-                "Notification": [{"hooks": [{"type":"command","command":"say done"}]}]
-            }
-        });
-        assert!(merge(&mut cfg, |_| None));
-        assert!(cfg["hooks"].get("PostToolUse").is_none(), "{cfg}");
-        assert_eq!(
-            cfg["hooks"]["Notification"][0]["hooks"][0]["command"], "say done",
-            "other tools' hooks survive, on any event"
-        );
-        assert!(!merge(&mut cfg, |_| None), "second merge changes nothing");
-    }
-
-    #[test]
-    fn merge_is_idempotent_and_replaces_legacy_bash() {
-        let mut cfg = serde_json::json!({
-            "permissions": {"allow": ["Bash(ls)"]},
-            "hooks": {
-                "SessionStart": [
-                    {"hooks": [{"type":"command","command":"bd prime"}]},
-                    {"hooks": [{"type":"command","command":"in=$(cat); PEAT_DB=/x peat brief || true"}]}
-                ],
-                "Stop": [{"hooks": [{"type":"command","command":"in=$(cat); nohup peat capture \"$TP\" &"}]}]
-            }
-        });
-        let m = |_: &str| None;
-        assert!(merge(&mut cfg, m));
-        assert_eq!(installed_events(&cfg).len(), EVENTS.len());
-        assert_eq!(
-            cfg["permissions"]["allow"][0], "Bash(ls)",
-            "other keys survive"
-        );
-        let ss = cfg["hooks"]["SessionStart"].as_array().unwrap();
-        assert_eq!(
-            ss[0]["hooks"][0]["command"], "bd prime",
-            "other tools' hooks survive"
-        );
-        assert_eq!(
-            ss.len(),
-            2,
-            "legacy peat group removed, one-verb group added"
-        );
-        assert_eq!(cfg["hooks"]["Stop"].as_array().unwrap().len(), 1);
-        assert!(!merge(&mut cfg, m), "second merge changes nothing");
-    }
-
-    #[test]
-    fn install_round_trips_on_disk() {
-        let dir = std::env::temp_dir().join(format!("peat-hook-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            install(&dir, Fabric::Claude, true).is_err(),
-            "nothing installed yet"
-        );
-        install(&dir, Fabric::Claude, false).unwrap();
-        install(&dir, Fabric::Claude, true).unwrap();
-        assert!(
-            install(&dir, Fabric::Claude, false)
-                .unwrap()
-                .starts_with("= ")
-        );
-        install(&dir, Fabric::Codex, false).unwrap();
-        assert!(dir.join(".codex/hooks.json").exists());
-        assert!(install_skill(&dir, Fabric::Claude, true).is_err());
-        install_skill(&dir, Fabric::Claude, false).unwrap();
-        install_skill(&dir, Fabric::Claude, true).unwrap();
-        assert!(
-            install_skill(&dir, Fabric::Claude, false)
-                .unwrap()
-                .starts_with("= ")
-        );
-        assert!(SKILL.starts_with("---\nname: peat\n"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

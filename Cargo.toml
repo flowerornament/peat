@@ -20,6 +20,7 @@ minijinja = "2"
 indicatif = "0.18"
 console = "0.16"
 libc = "0.2"
+toml_edit = "0.25.17"
 
 [profile.dev]
 opt-level = 3

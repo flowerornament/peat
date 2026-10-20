@@ -112,14 +112,15 @@ esac
 if $print_hooks; then
     cat <<'HOOKS'
 
-Claude Code hooks (merge into .claude/settings.json — see the repo's
-hooks/README.md for the full moment-coverage matrix and Codex forms):
+Hooks: run `peat hook install` once per machine (it wires the constant
+command `peat hook` into ~/.claude/settings.json and ~/.codex/config.toml),
+then `peat init` in each repo you want recorded. See the repo's
+hooks/README.md for the moment-coverage matrix:
 
-  SessionStart : write .peat/current-session; `peat brief` (stdout -> context)
-  Stop         : `peat capture <transcript> --final-msg <last message>`,
-                 then a once-per-session observation prompt
-  PreCompact   : salvage `peat capture` before the context window is replaced
-  SessionEnd   : salvage `peat capture` for /clear and other non-Stop endings
+  SessionStart : write .peat/current-session; brief (stdout -> context)
+  Stop         : detached `peat capture <transcript> --final-msg <last message>`
+  PreCompact   : salvage capture before the context window is replaced
+  SessionEnd   : salvage capture for /clear and other non-Stop endings
 
   https://github.com/flowerornament/peat/blob/main/hooks/README.md
 HOOKS

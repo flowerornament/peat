@@ -115,15 +115,15 @@ $ cargo test              # one #[ignore]d twin is SUPPOSED to fail when run
 
 fold/ese/anny arrive as git dependencies pinned by rev to the [bogkit fork](https://github.com/flowerornament/bogkit) (upstream PR flowercomputers/bogkit#18).
 
-**Then install the hooks.** Without them peat records nothing. In each project:
+**Then install the hooks, once per machine, and opt each repo in.** Without the hooks peat records nothing; without a ledger a repo is not recorded.
 
 ```console
-$ peat hook install            # Claude Code: .claude/settings.json
-$ peat hook install --codex    # Codex: .codex/hooks.json (then trust it in /hooks)
-$ peat hook install --check    # is it wired?
+$ peat hook install            # every Claude Code config dir + Codex's config.toml
+$ peat hook install --check    # is it wired? exit 1 and the drift per file if not
+$ cd ~/code/myrepo && peat init   # opt this repo in: creates its .peat/db
 ```
 
-Every hook is the same two words, `peat hook`, on four events: `SessionStart`, `Stop`, `PreCompact`, `SessionEnd`. The binary reads the harness's stdin JSON, sees which moment it is, and does the right thing. Install merges into an existing file, keeps other tools' hooks, replaces any peat bash snippet copied from an older release, and removes peat from events it no longer uses. It also lays the **peat skill** (`skills/peat/SKILL.md`, printable with `peat skill`) where the harness discovers it: when to look something up, and how far to trust what comes back. Because the hook command never changes, upgrading the binary upgrades the hooks. See [`hooks/README.md`](hooks/README.md) for the contract.
+Every hook is the same two words, `peat hook`, on four events: `SessionStart`, `Stop`, `PreCompact`, `SessionEnd`. The binary reads the harness's stdin JSON, sees which moment it is, and does the right thing — and where there is no ledger it does nothing, silently, so one user-level hook is correct in every repo. `peat hook install` writes it into `~/.claude/settings.json`, `$CLAUDE_CONFIG_DIR/settings.json` and the `settings.json` of every live `~/.claude-*` config dir (one with a `projects/` dir, e.g. `~/.claude-work`; a backup copy is left alone), and `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) when Codex is set up; then trust it in Codex's `/hooks`. Install merges: it keeps other tools' hooks and settings in place, replaces any peat bash snippet copied from an older release where it stands, removes peat from events it no longer uses, and refuses a file of a shape it does not write rather than repairing it. A repo's own copy of the hook (`.claude/settings.json`, `.claude/settings.local.json`, `.codex/hooks.json`, `.codex/config.toml`) fires a second time beside the user-level one; that is harmless (the brief is guarded, captures are idempotent), and install removes peat from the untracked copies and reports the tracked ones, which `--strip-project` removes. `~` is never treated as a repo. `peat init` creates the ledger at the repo root, or in a jj workspace or git worktree at the anchor repo every desk shares; a read in a repo that never ran it says so instead of creating one. `peat hook install --project` keeps the per-repo form (hooks in `.claude/settings.json`, the skill, the ledger) for a repo shared with people who lack the user-level hook. Because the hook command never changes, upgrading the binary upgrades the hooks. The **peat skill** (`skills/peat/SKILL.md`, printable with `peat skill`) says when to look something up and how far to trust what comes back. See [`hooks/README.md`](hooks/README.md) for the contract.
 
 ## Usage
 
@@ -211,24 +211,24 @@ Folds the journal into the LSM now — the maintenance cost that captures otherw
 
 ## The database
 
-- **Location**: `$PEAT_DB` if set, else `.peat/db` beside the nearest `.git`/`.jj` root above the working directory. `.peat/` belongs in `.gitignore`.
+- **Location**: `$PEAT_DB` if set, else `.peat/db` beside the nearest `.git`/`.jj` root above the working directory. `peat init` creates it (an explicit `PEAT_DB` is created on first use); `.peat/` ignores itself.
 - **Single writer.** fold is single-writer and reads are exclusive too. Colliding invocations wait with backoff (default 120 s, tune with `PEAT_LOCK_WAIT_SECS`), then exit 75 (`EX_TEMPFAIL`) with an explanation — never a raw panic. A bulk capture can legitimately hold the lock for minutes; short hook invocations interleave transparently.
 - **Durability**: bulk `capture` checkpoints the store afterward (memtable rotation) so subsequent opens do not replay a long journal; single-row writes deliberately do not, to keep the LSM's L0 healthy.
 - Deleting `.peat/db` loses nothing that a re-capture of the transcripts cannot rebuild — except observations, which live only in the ledger. Back up the ledger, not the views.
-- Beside the database: `current-session` (this desk's live session id), `redirect` (where a desk's shared ledger lives), and the pause marker `off`. Files left by 0.4.0 (`memory/`, `memory.mark`, `distill.lock`, `distill`, `distill-off`, `push`) are unused and can be deleted.
+- Beside the database: `current-session` (this desk's live session id), `fired/` (the SessionStart duplicate guard's markers), `redirect` (where a desk's shared ledger lives), and the pause marker `off`. Files left by 0.4.0 (`memory/`, `memory.mark`, `distill.lock`, `distill`, `distill-off`, `push`) are unused and can be deleted.
 
 ## Agent integration (Claude Code & Codex)
 
-One command, `peat hook`, is wired to four moments (`peat hook install` does the wiring); it reads the harness's stdin JSON and dispatches on `hook_event_name`. The contract and the moment-coverage matrix live in [`hooks/README.md`](hooks/README.md).
+One command, `peat hook`, is wired to four moments in the user-level configs (`peat hook install` does the wiring); it reads the harness's stdin JSON and dispatches on `hook_event_name`. The contract and the moment-coverage matrix live in [`hooks/README.md`](hooks/README.md).
 
 | moment         | `peat hook` does                                                                                                                                                                     |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SessionStart` | writes `.peat/current-session`; prints this desk's previous closing message (a different session, ended within three days) and one line on how to look things up — **stdout is injected into the session's context** |
+| `SessionStart` | writes `.peat/current-session`; prints this desk's previous closing message (a different session, ended within three days) and one line on how to look things up — **stdout is injected into the session's context**; the same start fired twice within 10 s briefs once |
 | `Stop`         | detached capture, `--final-msg` from `last_assistant_message` — **never blocks**                                                                                                    |
 | `PreCompact`   | detached salvage capture before the context window is replaced                                                                                                                      |
 | `SessionEnd`   | detached salvage capture on `/clear` and other non-Stop endings                                                                                                                     |
 
-Codex ≥0.148 supports the same hook set and stdin contract; `peat hook install --codex` wires it, and the Stop rollout fallback is built in. **On Codex the hooks must also be trusted before they run** — installing writes nothing that fires; run `/hooks` in the Codex CLI to review and trust, once per desk. peat failing may never break a session: `peat hook` exits 0 on every path, and does nothing at all where no ledger exists or a `.peat/off` marker is present.
+Codex ≥0.148 supports the same hook set and stdin contract; `peat hook install` wires it in `~/.codex/config.toml`, and the Stop rollout fallback is built in. **On Codex the hooks must also be trusted before they run** — installing writes nothing that fires; run `/hooks` in the Codex CLI to review and trust, once per machine. peat failing may never break a session: `peat hook` exits 0 on every path, and does nothing at all where no ledger exists or a `.peat/off` marker is present.
 
 ## Multiple agents, one record
 

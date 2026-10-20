@@ -10,17 +10,39 @@ peat hook
 
 Claude Code and Codex hand each hook a JSON object on stdin that names its own moment (`hook_event_name`), so one verb serves all four. What used to be six bash snippets (jq extraction, once-per-session markers, `nohup` detachment, per-desk `PEAT_DB` anchors and `READY` gates) is now code in `src/hook.rs`, versioned with the binary. **Upgrading peat upgrades the hooks**; the command in your settings file never changes. (0.5.0 retired two events; `peat hook install` removes them.)
 
-## Install
+## Install: once per machine, then `peat init` per repo
+
+`peat hook` does nothing where there is no ledger, so the hook belongs in the **user-level** configs, written once and correct in every repo; a repo opts in by having a ledger.
 
 ```console
-$ peat hook install            # Claude Code → .claude/settings.json
-$ peat hook install --local    # Claude Code → .claude/settings.local.json (git-ignored, per-user)
-$ peat hook install --codex    # Codex       → .codex/hooks.json
-$ peat hook install --check    # exit 0 if wired on all four events, else 1 and what is missing
-$ peat hook install --print    # the snippet, for pasting by hand
+$ peat hook install            # the user-level configs (below)
+$ peat hook install --check    # per-file report; exit 1 on any drift
+$ peat hook install --print    # what each file would receive, without writing
+$ peat init                    # in a repo: create its ledger (idempotent)
 ```
 
-Install also writes the peat skill to `.claude/skills/peat/SKILL.md` (`--codex`: `.agents/skills/peat/SKILL.md`); `peat skill` prints it. Install is a merge, and idempotent: other keys and other tools' hooks (`bd prime`, formatters) are kept; any hook that invokes peat some other way — the copied snippets of releases before 0.4.0 — is removed so each event ends up with exactly one peat hook, and peat is removed from the events it no longer uses (`UserPromptSubmit`, `PostToolUse`). It also creates the ledger if the desk has none, because `peat hook` is a no-op without one. The file is rewritten as pretty JSON with keys sorted.
+The user-level configs:
+
+| harness     | file                                                                                                  |
+| ----------- | ----------------------------------------------------------------------------------------------------- |
+| Claude Code | `~/.claude/settings.json`, `$CLAUDE_CONFIG_DIR/settings.json`, and `settings.json` in every live `~/.claude-*` dir (it also holds `projects/`, e.g. `~/.claude-work`; a backup copy does not) |
+| Codex       | `$CODEX_HOME/config.toml`, else `~/.codex/config.toml` when `~/.codex` exists — `[[hooks.<Event>]]` blocks |
+
+Install is a merge, and idempotent: other keys and other tools' hooks (`bd prime`, `hail`, formatters) are kept where they are. A hook that runs peat some other way — the copied snippets of releases before 0.4.0, matched only where peat is the program a command runs and is followed by a verb a peat hook ran (`hook`, `capture`, `brief`, `obs`, `push`, `distill`, `recall`), never as a substring or inside quoted text except the script of a shell's `-c` (`repeat …`, `say "peat finished"` and `hail fyi peat 'build ok'` are not peat; `sh -c 'peat capture …'` is; `/nix/…/bin/peat hook` is the current hook) — is replaced by `peat hook` in its own slot, so no other tool's group changes index (Codex keys hook trust to `path:event:group:hook`); peat is removed from the events it no longer uses (`UserPromptSubmit`, `PostToolUse`). Where that removal moves another tool's hook to a lower index (`[peat hook, hail deliver]` on a retired event), install names each moved hook so you can re-trust it in Codex's `/hooks`. A file of a shape peat does not write (a top-level array, `"hooks": "…"`, an event that is not an array, an inline `hooks = {…}` or a plain `[hooks.Stop]` table) is refused with the file and key named, never repaired, and a file peat cannot read (permissions, not UTF-8) is refused, never overwritten. A file is written only when its content changes, atomically (a temp file beside it, created with the file's mode — 0600 for a new one — then a rename; a symlinked config is written at its target, and a read-only target is refused). Because the write is a rename, a hardlinked config becomes a separate file: the other links keep the old content. A JSON rewrite normalizes key order (pretty JSON, keys sorted); Codex's `config.toml` is edited in place, so its comments, ordering and trust records (`[hooks.state]`) survive. `--check` reports drift per file — an event missing `peat hook`, or a stale peat entry left on a retired event — and exits 1 on any.
+
+**Per-repo copies fire twice, harmlessly.** Releases up to 0.5.0 wrote the hooks into each repo (`.claude/settings.json`, `.claude/settings.local.json`, `.codex/hooks.json`; some repos carry `[[hooks.*]]` in `.codex/config.toml`). Beside the user-level hook these run a second time. The duplicate guard keeps the brief single — a `SessionStart` with the same session id and `source` that fires twice within 10 s prints once (the twins decide under an exclusive lock on a marker in `.peat/fired/`) — and a duplicate capture is idempotent. So install, run inside a repo, removes peat only from the copies that are not committed work (asked read-only of jj, or of git in a git-only repo; a file neither can vouch for counts as tracked), keeping every other tool's hooks and deleting a file that held only peat's. A tracked copy is reported with the command that removes it, `peat hook install --strip-project`. `--check` lists repo copies as notes, never as drift, so an intentional `--project` setup stays green. The home directory is never treated as a repo, even when `~/.git` exists: its `.claude/` and `.codex/` are the user-level configs.
+
+`peat init` creates `.peat/db` at the repo root and prints where; in a jj workspace or git worktree it creates the anchor repo's ledger, which every desk of that repo then shares. It is the one way a ledger comes to exist (bar an explicit `PEAT_DB`): a read in a repo that never ran it says so rather than creating one.
+
+**The per-repo form** is still there for a repo shared with people who lack the user-level hook:
+
+```console
+$ peat hook install --project            # .claude/settings.json at the desk root
+$ peat hook install --project --local    # .claude/settings.local.json (git-ignored, per-user)
+$ peat hook install --project --codex    # .codex/hooks.json
+```
+
+It also writes the peat skill to `.claude/skills/peat/SKILL.md` (`--codex`: `.agents/skills/peat/SKILL.md`) and creates the ledger. `--check` passes on a desk with no skill copy (it may be installed user-level) and fails only on a stale one; `peat skill` prints it.
 
 Verified against the Claude Code hooks docs (2026-08-16) and Codex ≥0.148. There are no `$CLAUDE_TRANSCRIPT_PATH` / `$CLAUDE_SESSION_ID` environment variables; hooks receive **stdin JSON**.
 
@@ -75,7 +97,7 @@ Two independent gates, both required:
 1. **Project trust.** Project-local hooks load only when the project's `.codex/` layer is trusted; in an untrusted project Codex ignores project config, hooks, and rules entirely.
 2. **Hook trust.** Run `/hooks` in the Codex CLI to inspect sources, review new or changed hooks, and trust them. When review is pending at startup, Codex prints a warning pointing at `/hooks` — easy to miss in a scrollback, and the only symptom you get.
 
-Because the hook text is now the constant `peat hook`, this is **one review per desk**, not one per peat release as it was when the snippet changed; Codex keys trust to each hook definition, so after an install that adds or removes events (as 0.5.0 does), open `/hooks` once and trust anything it lists as pending. Codex also accepts the same hooks inline in `.codex/config.toml` (`[[hooks.SessionStart]]` with `hooks = [{ type = "command", command = "peat hook" }]`); a layer carrying both forms loads both and warns, so use one.
+Because the hook text is now the constant `peat hook` and lives in the user config, this is **one review per machine**, not one per peat release or per desk; Codex keys trust to each hook definition, so after an install that adds or removes events (as 0.5.0 does), open `/hooks` once and trust anything it lists as pending. The user-level install writes the inline form into `~/.codex/config.toml` (`[[hooks.SessionStart]]` with `hooks = [{ type = "command", command = "peat hook" }]`); `--project --codex` writes `.codex/hooks.json`. A layer carrying both forms loads both and warns, so use one.
 
 For non-interactive automation that vets hook sources by other means, `codex exec --dangerously-bypass-hook-trust` runs enabled hooks without persisted trust for that invocation.
 

@@ -35,5 +35,6 @@ Every line ends in `▸ peat …`, the command that opens it one level deeper. R
 - Don't run `peat capture` by hand; the hooks do. Exception: after a `Hook cancelled` message, `peat capture <transcript>` recovers the tail.
 - Don't paste peat output into commits or issues; give the handle.
 - Don't touch `.peat/`. `.peat/off` pauses peat.
+- A repo without a ledger is not recorded; the person opts it in with `peat init`. The hooks live in the user-level configs (`peat hook install`), never in the repo.
 
 Several desks share one ledger; a slow `peat` is usually a peer holding the lock.

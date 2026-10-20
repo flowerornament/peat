@@ -23,6 +23,18 @@ use crate::ui;
 /// (when that one exists), so a desk Claude Code or jj created on the fly
 /// remembers into the same mind without any per-desk setup.
 pub fn db_path() -> PathBuf {
+    resolve(false)
+}
+
+/// Where `peat init` puts the ledger: what [`db_path`] resolves to once
+/// the ledger exists. The same rules, except that a worktree or secondary
+/// workspace names its anchor's ledger even before that one exists, so
+/// opting a desk in opts its whole repo in.
+pub fn init_path() -> PathBuf {
+    resolve(true)
+}
+
+fn resolve(anchor_always: bool) -> PathBuf {
     if let Ok(p) = std::env::var("PEAT_DB") {
         return PathBuf::from(p);
     }
@@ -39,7 +51,7 @@ pub fn db_path() -> PathBuf {
         && let Some(anchor) = worktree_anchor(dir.parent().unwrap_or(&dir))
     {
         let shared = anchor.join(".peat").join("db");
-        if shared.is_dir() {
+        if anchor_always || shared.is_dir() {
             return shared;
         }
     }
@@ -85,6 +97,31 @@ fn normalize(p: &std::path::Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Create a peat data dir that ignores itself (cargo's `target/`
+/// pattern): without its `.gitignore`, jj snapshots whatever lands in it
+/// into the working commit on the very next command, and git accumulates
+/// it as untracked noise.
+pub fn ensure_ignored_dir(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let marker = dir.join(".gitignore");
+    if !marker.exists() {
+        let _ = std::fs::write(&marker, "*\n");
+    }
+}
+
+/// Exit with `code` — unless a hook is running (it set
+/// [`LOCK_FAIL_FALLBACK`]), which must never fail a session: it prints
+/// its fallback line and exits 0 whatever went wrong.
+pub fn bail(code: i32) -> ! {
+    if let Some(fallback) = LOCK_FAIL_FALLBACK.get() {
+        if !fallback.is_empty() {
+            ui::out(&format!("{fallback}\n"));
+        }
+        std::process::exit(0);
+    }
+    std::process::exit(code)
 }
 
 /// A process-wide cap on the lock wait, set by callers that run under a
@@ -178,18 +215,8 @@ where
         .unwrap_or(120u64)
         * 1000;
 
-    // the data dir ignores itself (cargo's target/ pattern): without this
-    // jj snapshots the database into the working commit on the very next
-    // command, and git accumulates it as untracked noise
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-        let marker = parent.join(".gitignore");
-        if !marker.exists() {
-            let _ = std::fs::write(
-                &marker, "*
-",
-            );
-        }
+        ensure_ignored_dir(parent);
     }
 
     let phase = ui::Phase::new("opening ledger");
@@ -214,11 +241,8 @@ where
                 }
                 if waited >= wait_max_ms {
                     drop(quiet);
-                    if let Some(fallback) = LOCK_FAIL_FALLBACK.get() {
-                        if !fallback.is_empty() {
-                            ui::out(&format!("{fallback}\n"));
-                        }
-                        std::process::exit(0);
+                    if LOCK_FAIL_FALLBACK.get().is_some() {
+                        bail(0);
                     }
                     ui::error(&format!(
                         "ledger still locked after {}s — another peat \
@@ -226,7 +250,7 @@ process holds it (reads are exclusive too; a bulk capture can hold it for \
 minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
                         wait_max_ms / 1000
                     ));
-                    std::process::exit(75); // EX_TEMPFAIL
+                    bail(75); // EX_TEMPFAIL
                 }
                 if waited == 0 && !ui::fancy_err() && LOCK_FAIL_FALLBACK.get().is_none() {
                     // non-tty gets one plain line instead of a spinner
@@ -291,10 +315,32 @@ pub fn beside(db: &std::path::Path, suffix: &str) -> PathBuf {
 /// investment, and this is the code path that touches it.
 pub fn migrate_views(dbdir: &std::path::Path) {
     let marker = beside(dbdir, ".view-version");
-    let on_disk: Option<u32> = std::fs::read_to_string(&marker)
-        .ok()
-        .and_then(|s| s.trim().parse().ok());
-    if on_disk == Some(VIEW_VERSION) {
+    let current = || {
+        std::fs::read_to_string(&marker)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            == Some(VIEW_VERSION)
+    };
+    if current() {
+        return;
+    }
+    // the marker lives beside the db: its directory must exist before a
+    // fresh database's marker is written, or the next open would find no
+    // marker and "rebuild" the db the first one just created
+    if let Some(parent) = dbdir.parent() {
+        ensure_ignored_dir(parent);
+    }
+    // one migrator at a time: concurrent first opens (two SessionStarts
+    // right after an upgrade) would otherwise rebuild into the same
+    // `.rebuild` dir and swap over each other. The second waits, then
+    // finds the marker current.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(beside(dbdir, ".migrate.lock"));
+    let _held = lock.as_ref().ok().filter(|f| f.lock().is_ok());
+    if current() {
         return;
     }
     if !dbdir.exists() {
@@ -330,7 +376,7 @@ original is intact (possibly at {})",
             dbdir.display(),
             backup.display()
         ));
-        std::process::exit(1);
+        bail(1);
     }
     let _ = std::fs::write(&marker, format!("{VIEW_VERSION}\n"));
     phase.done();
