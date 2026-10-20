@@ -10,9 +10,13 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # the toolchain the local gate uses: rust-toolchain.toml, with its
+      # components (rustup on the runner reads the file)
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo clippy --version
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings

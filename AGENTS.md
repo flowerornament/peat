@@ -19,6 +19,8 @@ just check     # fmt + clippy -D warnings + test — the land gate
 cargo run -- brief
 ```
 
+The Rust toolchain is pinned in `rust-toolchain.toml`; the local gate (through rustup), CI and release builds all use it. Bump it deliberately, with `just check` green under the new version in the same change.
+
 This repo captures its own development through the user-level hook `peat hook` (wired once in `~/.claude/settings.json`, `~/.claude-work/settings.json` and `~/.codex/config.toml`, never per repo), which briefs on start and captures at stop, compaction and session end. The ledger lives in the colocated checkout (`~/code/peat/.peat`); workspaces reach it through `.peat/redirect`.
 
 ## Version Control

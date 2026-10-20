@@ -1,0 +1,8 @@
+# The one toolchain `just check` (local gate, via the rustup proxy), CI and
+# the release builds all use: a lint new in a later clippy must not go red
+# in CI only. Bump it deliberately, and run `just check` in the same change.
+# The Nix package builds with nixpkgs' rustc and ignores this file.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
