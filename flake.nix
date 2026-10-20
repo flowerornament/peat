@@ -1,5 +1,13 @@
 {
   description = "peat — agent memory as a fold";
+  # Built packages are published to this cache by .github/workflows/nix-cache.yml,
+  # so consumers substitute instead of compiling.
+  nixConfig = {
+    extra-substituters = [ "https://flowerornament.cachix.org" ];
+    extra-trusted-public-keys = [
+      "flowerornament.cachix.org-1:gSODgIXgfRANrEGITBOF8XWaEKNy8hkNGfRVwqUG46c="
+    ];
+  };
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   outputs = { self, nixpkgs }:
     let
