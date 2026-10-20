@@ -123,8 +123,13 @@ fn codex_rollout(session: &str) -> Option<PathBuf> {
 /// Is peat switched on for this desk? The ledger must exist (or resolve
 /// through a redirect / worktree anchor), and no `.peat/off` marker may
 /// be present beside the desk or beside the ledger — the pause switch.
+/// A view swap a killed rebuild left half-done is finished first (mid-swap
+/// the db dir itself is briefly absent), and one still in flight counts
+/// as a ledger.
 pub fn enabled() -> bool {
-    db::db_path().is_dir() && !paused()
+    let db = db::db_path();
+    db::settle(&db);
+    (db.is_dir() || db::swap_pending(&db)) && !paused()
 }
 
 /// Is a `.peat/off` marker present beside the desk or beside the ledger?
@@ -214,20 +219,46 @@ fn fire_key(input: &Input) -> Option<String> {
     )
 }
 
-/// Spawn `peat <args>` in its own process group with all stdio closed,
-/// so the hook returns in milliseconds and a harness deadline (or
-/// teardown) cannot cancel the work.
-fn detach(args: &[&std::ffi::OsStr]) {
+/// Spawn `peat <args>` in its own process group with stdin and stdout
+/// closed and stderr closed or appended to `log`, so the hook returns in
+/// milliseconds, never shares the harness's pipes, and a harness deadline
+/// (or teardown) cannot cancel the work.
+pub(crate) fn detach(args: &[&std::ffi::OsStr], log: Option<&Path>) {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("peat"));
     let mut cmd = std::process::Command::new(exe);
+    let stderr = log
+        .and_then(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
+        })
+        .map_or_else(std::process::Stdio::null, std::process::Stdio::from);
     cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(stderr);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+        // a descriptor the harness left open without close-on-exec (a
+        // pipe it reads to EOF, say) must not stay open in a child that
+        // outlives the hook. Runs after stdio is set up; close(2) is
+        // async-signal-safe. std's exec-error pipe closes with the rest,
+        // so a failed exec reads as a spawn that worked: ignored anyway.
+        // SAFETY: only close(2) and sysconf(3) run between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                let max = libc::sysconf(libc::_SC_OPEN_MAX);
+                let max = if max <= 0 { 4096 } else { max.min(65_536) } as libc::c_int;
+                for fd in 3..max {
+                    libc::close(fd);
+                }
+                Ok(())
+            });
+        }
     }
     let _ = cmd.spawn();
 }
@@ -242,6 +273,12 @@ pub fn run(event_override: Option<String>) -> Action {
         input.event = e;
     }
     if !enabled() {
+        return Action::Nothing;
+    }
+    // views a newer peat wrote are not this binary's to read, rebuild or
+    // write into: one line on stderr, nothing on stdout, exit 0
+    if let db::Views::Newer(v) = db::views(&db::db_path()) {
+        crate::ui::eline(&format!("peat: {}", db::newer_views_message(v)));
         return Action::Nothing;
     }
     let action = plan(&input);
@@ -275,7 +312,7 @@ fn detach_capture(transcript: &Path, final_msg: Option<&str>) {
     if let Some(m) = final_msg {
         args.extend(["--final-msg".as_ref(), std::ffi::OsStr::new(m)]);
     }
-    detach(&args);
+    detach(&args, None);
 }
 
 #[cfg(test)]

@@ -206,6 +206,10 @@ pub enum Cmd {
     /// JSON and dispatches on hook_event_name, never failing the session:
     /// SessionStart → the agent brief (+ session id); Stop / PreCompact /
     /// SessionEnd → detached capture
+    /// Rebuild the views if their schema is older than this peat's, then
+    /// exit (the detached rebuild a SessionStart hook starts)
+    #[command(hide = true)]
+    MigrateViews,
     Hook {
         /// Override the event (default: stdin's hook_event_name)
         #[arg(long)]

@@ -31,7 +31,7 @@ Three goals, asymmetric effort:
 Three invariants hold everywhere:
 
 - **No wall-clock reads in any fold path.** Time enters only at the capture/render boundary (event timestamps from transcripts or the caller; age labels at print time). This is what makes `asof` replay the truth of a past day rather than a reconstruction.
-- **Additive schema evolution only.** Every envelope carries the `EVENT_VERSION` it was written under (currently 3); every envelope ever written must parse forever. New variants and optional fields only. (Views are disposable and rebuild themselves from the ledger when their schema moves; the previous database is kept one generation back.)
+- **Additive schema evolution only.** Every envelope carries the `EVENT_VERSION` it was written under (currently 3); every envelope ever written must parse forever. New variants and optional fields only. (Views are disposable and rebuild themselves from the ledger when their schema moves forward — in the background when a hook finds them stale, never inside it; an older peat refuses views a newer one wrote. The previous database is kept one generation back.)
 - **Every recalled line carries its disposition.** Age, origin kind, citation status and basis are printed inline: rank is not currency, and an uncited observation is visibly a bare assertion. An observation shows the commit it was deposited against (`@abc1234+`; `+` means the tree was dirty); to see what changed since, ask jj. peat does not mark a claim "verified" because its files are unchanged: that is wrong both ways.
 
 ## Architecture

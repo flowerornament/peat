@@ -108,7 +108,9 @@ fn main() {
     // a ledger comes to exist only by `peat init` (or an explicit
     // PEAT_DB): a read in a repo that never opted in must not opt it in
     let path = db::db_path();
-    if std::env::var_os("PEAT_DB").is_none() && !path.is_dir() {
+    // a rebuild killed mid-swap leaves no `db` dir for an instant: finish it
+    db::settle(&path);
+    if std::env::var_os("PEAT_DB").is_none() && !path.is_dir() && !db::swap_pending(&path) {
         ui::error(&format!(
             "no ledger here ({}) — run `peat init` to opt this repo in",
             path.display()
@@ -251,6 +253,8 @@ fn main() {
             }
         }
         Cmd::Compact => cmd::capture::compact(&mut st),
+        // the open above migrated the views; nothing else to do
+        Cmd::MigrateViews => {}
         Cmd::Asof { date, task, json } => cmd::asof::asof(st, date, task, json),
         Cmd::Hook { .. } | Cmd::Skill { .. } | Cmd::Init => {
             unreachable!("handled before the ledger opens")

@@ -159,7 +159,11 @@ pub fn out(text: &str) {
 /// panics when stderr is closed).
 pub fn eline(line: &str) {
     use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "{line}");
+    // one write per line: several processes appending to one log (the
+    // detached rebuild's) must not interleave halves of lines
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(format!("{line}\n").as_bytes());
 }
 
 /// Dim receipt line on stderr (`peat: captured 161 events …`).

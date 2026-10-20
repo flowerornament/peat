@@ -316,7 +316,22 @@ minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
 pub type Db = Ledger<crate::pipeline::Pipeline>;
 
 /// Open peat's ledger at `path` (views migrated first).
+///
+/// The marker is checked again once the store's lock is held: a process
+/// that passed [`migrate_views`] and then waited in [`open`] while a newer
+/// peat rebuilt and swapped the views would otherwise open the swapped-in
+/// database and write rows of the wrong shape into it. On a changed marker
+/// it lets go and goes round again (migrate, or refuse newer views).
+/// (Bounded: a marker that cannot be written — a read-only `.peat` — must
+/// not spin; the third open is used as it is.)
 pub fn open_db(path: PathBuf) -> Db {
+    for _ in 0..2 {
+        migrate_views(&path);
+        let st = open(path.clone(), crate::pipeline::pipeline);
+        if views(&path) == Views::Current {
+            return st;
+        }
+    }
     migrate_views(&path);
     open(path, crate::pipeline::pipeline)
 }
@@ -333,9 +348,11 @@ pub fn now_ms() -> u64 {
 // ---- view schema ------------------------------------------------------
 
 /// Bumped when any view row changes shape (view rows are postcard and
-/// positional, same as the ledger — but views are disposable). On mismatch
-/// the ledger mirror, whose envelopes parse forever, is replayed through
-/// the current pipeline into a fresh database that replaces the old one.
+/// positional, same as the ledger — but views are disposable). When the
+/// on-disk views are older, the ledger mirror, whose envelopes parse
+/// forever, is replayed through the current pipeline into a fresh database
+/// that replaces the old one ([`migrate_views`]); when they are newer, this
+/// binary refuses them.
 ///
 /// History: 1 = v0.1.x shapes (implicit — no marker file);
 /// 2 = `ObsRow`/`SubjStats` carry the deposit-time `Basis`;
@@ -351,21 +368,157 @@ pub fn beside(db: &std::path::Path, suffix: &str) -> PathBuf {
     db.with_file_name(name)
 }
 
-/// Rebuild every view from the ledger when the view schema has moved on.
-/// Runs before every open; self-healing by construction — hook-driven
-/// invocations must never be the ones that fail. The previous database is
+/// Where the on-disk views stand against this binary's [`VIEW_VERSION`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Views {
+    /// The marker names this binary's version: read them.
+    Current,
+    /// Older (or no marker: v1 wrote none): rebuild from the ledger.
+    Stale,
+    /// A newer peat wrote them: this binary must neither read nor rebuild
+    /// them, or two binaries sharing a ledger rebuild over each other.
+    Newer(u32),
+}
+
+/// Read the view-version marker beside `dbdir`.
+pub fn views(dbdir: &std::path::Path) -> Views {
+    let v = std::fs::read_to_string(beside(dbdir, ".view-version"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    match v {
+        Some(v) if v == VIEW_VERSION => Views::Current,
+        Some(v) if v > VIEW_VERSION => Views::Newer(v),
+        _ => Views::Stale,
+    }
+}
+
+/// What a binary older than the views says: the hook one stderr line (it
+/// then does nothing), every other command an error.
+pub fn newer_views_message(v: u32) -> String {
+    format!(
+        "this ledger's views are v{v}, written by a newer peat; this peat \
+({}) reads v{VIEW_VERSION} and will not rebuild them — upgrade peat",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Is this process a harness hook (it set [`LOCK_FAIL_FALLBACK`])?
+fn in_hook() -> bool {
+    LOCK_FAIL_FALLBACK.get().is_some()
+}
+
+/// The migration lock beside `dbdir`, opened (not yet locked).
+fn migrate_lock(dbdir: &std::path::Path) -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(beside(dbdir, ".migrate.lock"))
+        .ok()
+}
+
+/// Finish a view swap that a killed rebuild left between its two renames.
+/// Cheap (renames only) and safe from any process, hooks included: it
+/// runs only when it can take the migration lock at once — a live
+/// migrator holds it and finishes its own swap. Run before anything asks
+/// whether the ledger exists, since mid-swap `db` itself may be missing.
+pub fn settle(dbdir: &std::path::Path) {
+    if !beside(dbdir, ".swap").exists() {
+        return;
+    }
+    let Some(lock) = migrate_lock(dbdir) else {
+        return;
+    };
+    if lock.try_lock().is_ok() {
+        let _ = finish_swap(dbdir);
+    }
+}
+
+/// Is a swap pending (a migrator is between renames, or was killed there)?
+pub fn swap_pending(dbdir: &std::path::Path) -> bool {
+    beside(dbdir, ".swap").exists()
+}
+
+/// Swap the complete rebuild at `db.rebuild` in for `db` (kept as
+/// `db.old`), then write the marker. Every step is idempotent and the
+/// `db.swap` intent file is written only once the rebuild is complete
+/// and closed, so a run killed anywhere in here is finished by the next
+/// call — under the migration lock — from what is on disk:
+///
+/// - `db` and `db.rebuild` both present: nothing renamed yet.
+/// - `db` absent, `db.rebuild` present: the first rename happened.
+/// - `db` present, `db.rebuild` absent: both happened; only the marker is
+///   missing.
+///
+/// The marker is written last, so a swap that has not finished is never
+/// read as current views.
+fn finish_swap(dbdir: &std::path::Path) -> std::io::Result<()> {
+    let (fresh, backup, intent) = (
+        beside(dbdir, ".rebuild"),
+        beside(dbdir, ".old"),
+        beside(dbdir, ".swap"),
+    );
+    if dbdir.exists() && fresh.exists() {
+        let _ = std::fs::remove_dir_all(&backup);
+        std::fs::rename(dbdir, &backup)?;
+    }
+    if !dbdir.exists() {
+        if fresh.exists() {
+            std::fs::rename(&fresh, dbdir)?;
+        } else if backup.exists() {
+            // an intent with no rebuild beside it is not ours to finish:
+            // put the ledger back, still stale, for a clean rebuild
+            std::fs::rename(&backup, dbdir)?;
+            return std::fs::remove_file(&intent);
+        }
+    }
+    std::fs::write(beside(dbdir, ".view-version"), format!("{VIEW_VERSION}\n"))?;
+    std::fs::remove_file(&intent)
+}
+
+/// Start the view rebuild in a detached `peat` (the hidden
+/// `migrate-views` verb), unless one is already running (it holds the
+/// migration lock). Its stderr goes to `db.rebuild.log` beside the db.
+fn spawn_rebuild(dbdir: &std::path::Path) {
+    if let Some(lock) = migrate_lock(dbdir) {
+        if lock.try_lock().is_err() {
+            return; // a migrator is at work
+        }
+        // released before the child starts; a second hook racing here
+        // spawns a second child, which waits and finds the views current
+        drop(lock);
+    }
+    crate::hook::detach(
+        &["migrate-views".as_ref()],
+        Some(&beside(dbdir, ".rebuild.log")),
+    );
+}
+
+/// Bring the views up to this binary's schema before an open.
+///
+/// - Current: nothing.
+/// - Newer: refuse. A hook says so in one stderr line and exits 0 with
+///   nothing on stdout; any other command exits 1.
+/// - Stale, in a hook: never rebuild inline — the rebuild of a large
+///   ledger takes minutes, and a hook runs under a harness deadline that
+///   would kill it and retry it on every start. Start it detached and
+///   exit 0 with the fallback line ([`bail`]). Captures need nothing
+///   special: the hook already runs them as detached `peat capture`
+///   processes, which come through here as ordinary commands and wait for
+///   the rebuild (or run it) before writing.
+/// - Stale, anywhere else: rebuild now, under the migration lock (one
+///   migrator at a time; the rest wait without deadline, then find the
+///   views current).
+///
+/// The rebuild replays the ledger mirror through the current pipeline into
+/// `db.rebuild` and swaps it in ([`finish_swap`]). The previous database is
 /// kept at `db.old` (one generation), never deleted: the ledger is the
 /// investment, and this is the code path that touches it.
 pub fn migrate_views(dbdir: &std::path::Path) {
-    let marker = beside(dbdir, ".view-version");
-    let current = || {
-        std::fs::read_to_string(&marker)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            == Some(VIEW_VERSION)
-    };
-    if current() {
-        return;
+    match views(dbdir) {
+        Views::Current => return,
+        Views::Newer(v) => refuse_newer(v),
+        Views::Stale => {}
     }
     // the marker lives beside the db: its directory must exist before a
     // fresh database's marker is written, or the next open would find no
@@ -373,33 +526,52 @@ pub fn migrate_views(dbdir: &std::path::Path) {
     if let Some(parent) = dbdir.parent() {
         ensure_ignored_dir(parent);
     }
-    // one migrator at a time: concurrent first opens (two SessionStarts
-    // right after an upgrade) would otherwise rebuild into the same
-    // `.rebuild` dir and swap over each other. The second waits, then
-    // finds the marker current.
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(beside(dbdir, ".migrate.lock"));
-    let _held = lock.as_ref().ok().filter(|f| f.lock().is_ok());
-    if current() {
-        return;
+    if in_hook() && (dbdir.exists() || swap_pending(dbdir)) {
+        spawn_rebuild(dbdir);
+        ui::eline(&format!(
+            "peat: view schema changed — rebuilding the views (v{VIEW_VERSION}) in the \
+background; the brief returns once that finishes"
+        ));
+        bail(0);
+    }
+    let lock = migrate_lock(dbdir);
+    let _held = lock.as_ref().filter(|f| wait_for_migrator(f));
+    match views(dbdir) {
+        Views::Current => return,
+        Views::Newer(v) => refuse_newer(v),
+        Views::Stale => {}
+    }
+    if swap_pending(dbdir) {
+        // a rebuild was killed mid-swap; its rebuild is complete
+        if let Err(e) = finish_swap(dbdir) {
+            swap_failed(dbdir, &e);
+        }
+        if views(dbdir) == Views::Current {
+            return;
+        }
     }
     if !dbdir.exists() {
         // fresh database: no rows exist in any shape yet
-        let _ = std::fs::write(&marker, format!("{VIEW_VERSION}\n"));
+        let _ = std::fs::write(beside(dbdir, ".view-version"), format!("{VIEW_VERSION}\n"));
         return;
     }
     let phase = ui::Phase::new("view schema changed — rebuilding views from the ledger");
-    // reading only the ledger mirror is safe under any view schema:
-    // envelopes are additive-only, and nothing here reads a view row
-    let events: Vec<(EventId, Envelope)> = {
-        let st = open(dbdir.to_path_buf(), crate::pipeline::pipeline);
-        st.rtx(|(_, _, _, _, _, ledger)| ledger.iter().collect())
-    };
     let fresh_dir = beside(dbdir, ".rebuild");
+    // a rebuild killed before its swap leaves a partial `db.rebuild`,
+    // never read: start over
     let _ = std::fs::remove_dir_all(&fresh_dir);
+    // reading only the ledger mirror is safe under any view schema:
+    // envelopes are additive-only, and nothing here reads a view row.
+    // The old db stays open (its store lock held) until the swap has
+    // renamed it aside and the marker is written, so no process — an older
+    // peat retrying its open, say — can write into a database the swap is
+    // about to set aside (its capture cursor, kept outside the db, would
+    // make that loss permanent). One that opens the swapped-in db after the
+    // lock is released finds the new marker ([`open_db`]).
+    let old = open(dbdir.to_path_buf(), crate::pipeline::pipeline);
+    let events: Vec<(EventId, Envelope)> =
+        old.rtx(|(_, _, _, _, _, ledger)| ledger.iter().collect());
+    let n = events.len();
     {
         let mut fresh = open(fresh_dir.clone(), crate::pipeline::pipeline);
         fresh.wtx(|tx| {
@@ -408,33 +580,163 @@ pub fn migrate_views(dbdir: &std::path::Path) {
             }
         });
         fresh.checkpoint();
+        retire_journal(&fresh_dir);
     }
-    let backup = beside(dbdir, ".old");
-    let _ = std::fs::remove_dir_all(&backup);
-    let swap = std::fs::rename(dbdir, &backup).and_then(|()| std::fs::rename(&fresh_dir, dbdir));
-    if let Err(e) = swap {
-        ui::error(&format!(
-            "view rebuild could not swap databases at {}: {e} — the \
-original is intact (possibly at {})",
-            dbdir.display(),
-            backup.display()
-        ));
-        bail(1);
+    drop(events);
+    test_delay();
+    if let Err(e) = std::fs::write(beside(dbdir, ".swap"), "").and_then(|()| finish_swap(dbdir)) {
+        swap_failed(dbdir, &e);
     }
-    let _ = std::fs::write(&marker, format!("{VIEW_VERSION}\n"));
+    drop(old);
     phase.done();
-    if events.is_empty() {
+    if n == 0 {
         ui::note(
             "views rebuilt from an empty ledger mirror — if this db held \
 sessions, re-run `peat capture` on their transcripts to backfill",
         );
     } else {
         ui::note(&format!(
-            "view schema v{VIEW_VERSION}: rebuilt from {} ledger events \
+            "view schema v{VIEW_VERSION}: rebuilt from {n} ledger events \
 (previous db kept at {})",
-            events.len(),
-            backup.display()
+            beside(dbdir, ".old").display()
         ));
+    }
+}
+
+/// How long a command waits for another process's view rebuild before
+/// giving up. Generous: murail's rebuild takes 1–1.5 min and herald's
+/// ledger is larger, under load several times that.
+const MIGRATE_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Take the migration lock. A hook never waits ([`bail`]s at once); any
+/// other command waits up to [`MIGRATE_WAIT`], then exits `EX_TEMPFAIL`.
+/// A capture gives up before writing anything, cursor included, so the
+/// next capture of that transcript redoes it whole — except after a
+/// SessionEnd, which nothing follows: that transcript stays on disk,
+/// unrecorded until it is captured again by hand.
+fn wait_for_migrator(f: &std::fs::File) -> bool {
+    if f.try_lock().is_ok() {
+        return true;
+    }
+    if in_hook() {
+        bail(0);
+    }
+    ui::eline("peat: another peat is rebuilding the views; waiting for it…");
+    let wait = migrate_wait();
+    let start = std::time::Instant::now();
+    loop {
+        match f.try_lock() {
+            Ok(()) => return true,
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(_)) => return false,
+        }
+        if start.elapsed() >= wait {
+            ui::error(&format!(
+                "another peat has been rebuilding the views for over {}s; \
+giving up — retry once it finishes (its log: db.rebuild.log beside the ledger)",
+                wait.as_secs()
+            ));
+            bail(75); // EX_TEMPFAIL
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// [`MIGRATE_WAIT`]; debug builds take `PEAT_TEST_MIGRATE_WAIT_SECS`.
+fn migrate_wait() -> std::time::Duration {
+    #[cfg(debug_assertions)]
+    if let Some(s) = std::env::var("PEAT_TEST_MIGRATE_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return std::time::Duration::from_secs(s);
+    }
+    MIGRATE_WAIT
+}
+
+fn refuse_newer(v: u32) -> ! {
+    if in_hook() {
+        ui::eline(&format!("peat: {}", newer_views_message(v)));
+        std::process::exit(0);
+    }
+    ui::error(&newer_views_message(v));
+    std::process::exit(1)
+}
+
+fn swap_failed(dbdir: &std::path::Path, e: &std::io::Error) -> ! {
+    ui::error(&format!(
+        "view rebuild could not swap databases at {}: {e} — the ledger is \
+intact (at {} or {}); the next peat command finishes the swap",
+        dbdir.display(),
+        beside(dbdir, ".old").display(),
+        beside(dbdir, ".rebuild").display(),
+    ));
+    bail(1)
+}
+
+/// Journal files (`*.jnl`) in a database dir.
+pub fn journal_files(db: &std::path::Path) -> usize {
+    std::fs::read_dir(db)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "jnl"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// How long the rebuild waits for its sealed journal to be retired.
+const RETIRE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wait, with the rebuilt database still open, until fjall deletes the
+/// journal the rebuild was written through.
+///
+/// fjall 3.1 (read in its `journal/manager.rs` and `worker_pool.rs`): the
+/// first flush of the checkpoint seals the journal the rebuild was written
+/// through (the whole rebuild: 557 MB on murail's ledger), recording a
+/// watermark per keyspace; journal maintenance deletes it once every one
+/// of those keyspaces has persisted past its watermark, and runs after
+/// each flush. Past `max_journaling_size` (512 MiB) the sealing flush
+/// also asks the straggling keyspaces to rotate, and those flushes run on
+/// the worker after the checkpoint has returned: on murail's ledger the
+/// sealed journal was deleted about 2 s after the checkpoint. Closing
+/// sooner leaves it on disk, and every later open replays it (12 s for
+/// the first SessionStart after the swap). A reopen does not help: it
+/// replays it again and its checkpoint, with empty memtables, rotates
+/// nothing, so no maintenance runs. Waiting does; fold exposes no call
+/// that waits for maintenance, and none is needed.
+///
+/// What remains is the one active journal, preallocated (64 MiB on disk,
+/// empty), so the measure is the number of journal files, not their size.
+/// On timeout the rebuild goes ahead (the journal costs time, not
+/// correctness) and says so in its log.
+fn retire_journal(dir: &std::path::Path) {
+    let start = std::time::Instant::now();
+    while journal_files(dir) > 1 {
+        if start.elapsed() >= RETIRE_WAIT {
+            ui::eline(&format!(
+                "peat: WARNING the rebuilt views' journal was not retired within {}s \
+({} journal files at {}); every open will replay it until `peat compact`",
+                RETIRE_WAIT.as_secs(),
+                journal_files(dir),
+                dir.display()
+            ));
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Debug builds only: `PEAT_TEST_REBUILD_DELAY_MS` stretches a rebuild
+/// (after it is complete, before its swap, the old db still held) so
+/// tests can act while one runs. Release builds carry no such knob.
+fn test_delay() {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("PEAT_TEST_REBUILD_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
 

@@ -644,6 +644,173 @@ fn view_rebuild_replays_the_ledger() {
     assert_eq!(head.basis.unwrap().commit, "abcdef0123456789");
 }
 
+/// A database at `dir` holding `n` tool events (its ledger length tells
+/// one database from another).
+fn db_of(dir: &std::path::Path, n: u32) {
+    let mut st = open(dir);
+    st.wtx(|tx| {
+        for i in 0..n {
+            let (id, e) = tool("s", 16 + i, DAY_MS, true);
+            tx.upsert(&id, &e);
+        }
+    });
+}
+
+fn ledger_len(dir: &std::path::Path) -> usize {
+    open(dir).rtx(|(_, _, _, _, _, ledger)| ledger.iter().count())
+}
+
+fn marker_of(dir: &std::path::Path) -> String {
+    std::fs::read_to_string(crate::db::beside(dir, ".view-version"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// A rebuild killed anywhere in its swap is finished from what is on disk,
+/// never read as current before it is, and never loses the ledger. The
+/// rebuild proper is told apart from the original by its ledger length
+/// (3 vs 2 events); `db.swap` is written only once a rebuild is complete.
+#[test]
+fn a_rebuild_killed_mid_swap_is_finished_not_read_half_done() {
+    use crate::db::{Views, beside, migrate_views, settle, views};
+    let current = crate::db::VIEW_VERSION.to_string();
+    let stage = |db_present: bool, rebuild_present: bool| {
+        let dir = tmp();
+        if db_present {
+            db_of(&dir, 2);
+        } else {
+            db_of(&beside(&dir, ".old"), 2);
+        }
+        if rebuild_present {
+            db_of(&beside(&dir, ".rebuild"), 3);
+        }
+        std::fs::write(beside(&dir, ".view-version"), "1\n").unwrap();
+        std::fs::write(beside(&dir, ".swap"), "").unwrap();
+        dir
+    };
+    let finished = |dir: &std::path::Path| {
+        assert_eq!(marker_of(dir), current);
+        assert!(!beside(dir, ".swap").exists(), "intent cleared");
+        assert!(!beside(dir, ".rebuild").exists());
+        assert_eq!(ledger_len(dir), 3, "the rebuild is in place");
+        assert_eq!(ledger_len(&beside(dir, ".old")), 2, "original kept");
+    };
+
+    // killed before either rename: a full open finishes the swap
+    let dir = stage(true, true);
+    assert_eq!(views(&dir), Views::Stale, "half a swap is not current");
+    migrate_views(&dir);
+    finished(&dir);
+
+    // killed between the renames (`db` absent): `settle`, which every
+    // existence check runs first, finishes it
+    let dir = stage(false, true);
+    assert!(!dir.exists());
+    settle(&dir);
+    finished(&dir);
+
+    // killed after both renames, before the marker: only the marker is
+    // written — no second rebuild (one would leave db.old at 3 events)
+    let dir = stage(false, true);
+    std::fs::rename(beside(&dir, ".rebuild"), &dir).unwrap();
+    migrate_views(&dir);
+    finished(&dir);
+
+    // killed while building (no intent): the partial rebuild is discarded
+    // and the original's ledger rebuilt
+    let dir = tmp();
+    db_of(&dir, 2);
+    db_of(&beside(&dir, ".rebuild"), 3);
+    std::fs::write(beside(&dir, ".view-version"), "1\n").unwrap();
+    migrate_views(&dir);
+    assert_eq!(marker_of(&dir), current);
+    assert_eq!(ledger_len(&dir), 2, "rebuilt from the original ledger");
+    assert!(!beside(&dir, ".rebuild").exists());
+}
+
+/// The rebuild leaves only the active journal (see `db::retire_journal`).
+/// A guard, not an oracle: at this size (one sealed journal, under fjall's
+/// 512 MiB straggler threshold) maintenance already runs before the
+/// rebuild closes, so this passes with the wait knocked out. The race the
+/// wait closes needs a journal over 512 MiB — murail's ledger, where the
+/// knockout leaves the 557 MB journal behind — too slow for the gate.
+#[test]
+fn a_rebuild_leaves_only_the_active_journal() {
+    use crate::db::{beside, journal_files, migrate_views};
+    let dir = tmp();
+    {
+        let mut st = open(&dir);
+        st.wtx(|tx| {
+            for i in 0..1_200u32 {
+                let e = Envelope::new(
+                    "s",
+                    DAY_MS + u64::from(i),
+                    Event::ToolCall {
+                        tool: "Bash".into(),
+                        detail: format!("{i}:{}", "x".repeat(64 << 10)),
+                        ok: true,
+                    },
+                );
+                tx.upsert(&("s".to_string(), 16 + i), &e);
+            }
+        });
+    }
+    std::fs::write(beside(&dir, ".view-version"), "1\n").unwrap();
+    migrate_views(&dir);
+    assert_eq!(marker_of(&dir), crate::db::VIEW_VERSION.to_string());
+    assert_eq!(
+        journal_files(&dir),
+        1,
+        "the rebuild's journal is still on disk"
+    );
+    assert_eq!(ledger_len(&dir), 1_200);
+}
+
+/// A process that passed the marker check and then waited for the store
+/// while another rebuilt and swapped the views must not use the db it
+/// then gets: [`crate::db::open_db`] re-checks the marker under the lock.
+#[test]
+fn open_db_rechecks_the_marker_once_it_holds_the_store() {
+    use crate::db::{VIEW_VERSION, beside, open_db};
+    let dir = tmp();
+    db_of(&dir, 2);
+    std::fs::write(beside(&dir, ".view-version"), format!("{VIEW_VERSION}\n")).unwrap();
+    // another process holds the store; while it does, the views go stale
+    // under the waiter (as a newer peat's swap moves the marker)
+    let holder = open(&dir);
+    let waiter = {
+        let dir = dir.clone();
+        std::thread::spawn(move || drop(open_db(dir)))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    std::fs::write(beside(&dir, ".view-version"), "1\n").unwrap();
+    drop(holder);
+    waiter.join().unwrap();
+    assert_eq!(marker_of(&dir), VIEW_VERSION.to_string());
+    assert!(
+        beside(&dir, ".old").exists(),
+        "the waiter used views it never checked"
+    );
+}
+
+/// A marker newer than this binary is `Newer`, never `Stale`: an old
+/// binary must not rebuild over a new one's views.
+#[test]
+fn newer_views_are_not_stale() {
+    use crate::db::{VIEW_VERSION, Views, beside, views};
+    let dir = tmp();
+    let set = |v: &str| std::fs::write(beside(&dir, ".view-version"), v).unwrap();
+    assert_eq!(views(&dir), Views::Stale, "no marker: v1");
+    set(&format!("{}\n", VIEW_VERSION + 1));
+    assert_eq!(views(&dir), Views::Newer(VIEW_VERSION + 1));
+    set(&format!("{VIEW_VERSION}\n"));
+    assert_eq!(views(&dir), Views::Current);
+    set(&format!("{}\n", VIEW_VERSION - 1));
+    assert_eq!(views(&dir), Views::Stale);
+    let _ = std::fs::remove_file(beside(&dir, ".view-version"));
+}
+
 // ---------------------------------------------------- checkpoint policy
 //
 // Checkpointing costs a corpus-sized flush, so a capture pays it only when

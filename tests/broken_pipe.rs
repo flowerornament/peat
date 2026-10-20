@@ -28,8 +28,9 @@ struct Run {
 }
 
 /// Run peat in a scratch desk whose ledger dir exists but carries no view
-/// marker (so opening it prints the "views rebuilt" notice on stderr),
-/// with stdout and/or stderr widowed.
+/// marker (so opening it prints a view-rebuild notice on stderr: inline
+/// for a verb, a background rebuild for the hook), with stdout and/or
+/// stderr widowed.
 fn run(name: &str, args: &[&str], close_out: bool, close_err: bool) -> Run {
     let dir = scratch(name);
     let mut child = Command::new(env!("CARGO_BIN_EXE_peat"))
@@ -54,8 +55,26 @@ fn run(name: &str, args: &[&str], close_out: bool, close_err: bool) -> Run {
         e.read_to_string(&mut stderr).unwrap();
     }
     let status = child.wait().unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    remove(&dir);
     Run { status, stderr }
+}
+
+/// Remove a scratch desk once any background rebuild a hook started in
+/// it has finished (it would otherwise recreate the ledger after us).
+fn remove(dir: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        // no lock file: nothing ever opened the ledger
+        let lock = dir.join("db.migrate.lock");
+        let done = !lock.exists()
+            || (dir.join("db.view-version").exists()
+                && std::fs::File::open(&lock).is_ok_and(|f| f.try_lock().is_ok()));
+        if done {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -132,11 +151,11 @@ fn hook_scratch_desk_writes_both_streams() {
         .stdin(Stdio::null())
         .output()
         .expect("run peat");
-    let _ = std::fs::remove_dir_all(&dir);
+    remove(&dir);
     assert!(out.status.success());
     assert!(!out.stdout.is_empty(), "hook brief wrote nothing");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("views rebuilt"),
+        String::from_utf8_lossy(&out.stderr).contains("rebuilding the views"),
         "no stderr notice: {}",
         String::from_utf8_lossy(&out.stderr)
     );
