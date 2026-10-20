@@ -90,9 +90,10 @@ impl Phase {
             let took = self.started.elapsed();
             if took > Duration::from_millis(300) {
                 b.finish_and_clear();
-                eprintln!(
-                    "{}",
-                    console::style(format!("{} ({:.1}s)", self.label, took.as_secs_f64())).dim()
+                eline(
+                    &console::style(format!("{} ({:.1}s)", self.label, took.as_secs_f64()))
+                        .dim()
+                        .to_string(),
                 );
             } else {
                 b.finish_and_clear();
@@ -144,14 +145,34 @@ pub fn warn(s: &str) -> String {
     paint(fancy_out(), |c| c.red(), s)
 }
 
+/// Write `text` to stdout whole, dropping any error. The harness hook's
+/// only stdout writer: with SIGPIPE ignored there, a reader that left
+/// early must not turn into a panic (exit 101) or a failed hook.
+pub fn out(text: &str) {
+    use std::io::Write;
+    let mut o = std::io::stdout().lock();
+    let _ = o.write_all(text.as_bytes()).and_then(|()| o.flush());
+}
+
+/// One line on stderr, dropping any error. Every stderr notice goes
+/// through here: decoration must never be what fails a run (`eprintln!`
+/// panics when stderr is closed).
+pub fn eline(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{line}");
+}
+
 /// Dim receipt line on stderr (`peat: captured 161 events …`).
 pub fn note(msg: &str) {
-    eprintln!("{}", paint(fancy_err(), |c| c.dim(), msg));
+    eline(&paint(fancy_err(), |c| c.dim(), msg));
 }
 
 /// Error line on stderr: the `peat:` prefix in red, message plain.
 pub fn error(msg: &str) {
-    eprintln!("{} {msg}", paint(fancy_err(), |c| c.red(), "peat:"));
+    eline(&format!(
+        "{} {msg}",
+        paint(fancy_err(), |c| c.red(), "peat:")
+    ));
 }
 
 /// Register the style filters the brief template may use. Identity unless

@@ -216,7 +216,7 @@ where
                     drop(quiet);
                     if let Some(fallback) = LOCK_FAIL_FALLBACK.get() {
                         if !fallback.is_empty() {
-                            println!("{fallback}");
+                            ui::out(&format!("{fallback}\n"));
                         }
                         std::process::exit(0);
                     }
@@ -230,7 +230,7 @@ minutes). Retry shortly, or raise PEAT_LOCK_WAIT_SECS.",
                 }
                 if waited == 0 && !ui::fancy_err() && LOCK_FAIL_FALLBACK.get().is_none() {
                     // non-tty gets one plain line instead of a spinner
-                    eprintln!("peat: ledger busy (another peat process); waiting…");
+                    ui::eline("peat: ledger busy (another peat process); waiting…");
                 }
                 phase.tick(format!(
                     "ledger busy — another peat process · waiting {}s (gives up at {}s)",
@@ -423,11 +423,11 @@ impl<P: Push<Keyed<EventId, Envelope>>> Drop for Ledger<P> {
             CLOSE_DEADLINE,
             move || drop(store),
             || {
-                eprintln!(
+                ui::eline(&format!(
                     "peat: closing the ledger hung for {}s (fjall shutdown race); \
 exiting so the lock is released — every commit is already durable",
                     CLOSE_DEADLINE.as_secs()
-                );
+                ));
                 std::process::exit(0);
             },
         );

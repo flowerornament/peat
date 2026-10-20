@@ -37,6 +37,15 @@ use pipeline::DAY_MS;
 fn main() {
     let cli = Cli::parse();
 
+    // stdout is an API, and `peat … | head` is a normal read: a closed
+    // pipe ends the process quietly instead of panicking in println!. The
+    // harness hook keeps Rust's ignored SIGPIPE and drops the write error
+    // itself, so a reader that leaves early never turns a brief into a
+    // failed hook (a signal death or a non-zero exit).
+    if !matches!(cli.cmd, Some(Cmd::Hook { cmd: None, .. })) {
+        restore_default_sigpipe();
+    }
+
     // hooks run under a harness deadline and mostly need no ledger at
     // all; handle them before the open, and cap the wait when they do
     let cli = match cli.cmd {
@@ -68,10 +77,12 @@ fn main() {
                 let _ = db::LOCK_WAIT_SECS.set(15);
                 let _ = db::LOCK_FAIL_FALLBACK.set(brief::LOOKUP_LINE.to_string());
                 let st = db::open_db(db::db_path());
-                print!(
-                    "{}",
-                    brief::agent(&st, &brief::desk(), session.as_deref(), db::now_ms())
-                );
+                ui::out(&brief::agent(
+                    &st,
+                    &brief::desk(),
+                    session.as_deref(),
+                    db::now_ms(),
+                ));
                 return;
             }
             _ => return,
@@ -203,6 +214,18 @@ fn main() {
         Cmd::Compact => cmd::capture::compact(&mut st),
         Cmd::Asof { date, task, json } => cmd::asof::asof(st, date, task, json),
         Cmd::Hook { .. } | Cmd::Skill => unreachable!("handled before the ledger opens"),
+    }
+}
+
+/// Die by SIGPIPE, as a Unix filter does, when the reader closes stdout.
+/// Rust ignores SIGPIPE by default, which turns every print into a panic
+/// on a closed pipe; restoring the default fixes the whole class at once.
+fn restore_default_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: called once at startup, before any thread exists; setting a
+    // signal disposition to SIG_DFL installs no handler code.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 

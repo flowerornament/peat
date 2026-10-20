@@ -671,6 +671,7 @@ dependencies = [
  "ese",
  "fold",
  "indicatif",
+ "libc",
  "minijinja",
  "serde",
  "serde_json",
