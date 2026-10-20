@@ -127,6 +127,43 @@ impl Homes {
 /// is set up on this machine.
 pub fn user_targets(h: &Homes) -> Vec<Target> {
     let user_fix = || "peat hook install".to_string();
+    let mut out: Vec<Target> = Vec::new();
+    for d in claude_dirs(h) {
+        let path = d.join("settings.json");
+        if !out.iter().any(|t| same_file(&t.path, &path)) {
+            out.push(Target {
+                path,
+                format: Format::Json,
+                harness: "claude",
+                fix: user_fix(),
+            });
+        }
+    }
+    if let Some(codex) = codex_home(h) {
+        out.push(Target {
+            path: codex.join("config.toml"),
+            format: Format::Toml,
+            harness: "codex",
+            fix: user_fix(),
+        });
+    }
+    out
+}
+
+/// Codex's home (`$CODEX_HOME`, else `~/.codex`), when Codex is set up on
+/// this machine.
+fn codex_home(h: &Homes) -> Option<PathBuf> {
+    let codex = h
+        .codex_home
+        .clone()
+        .unwrap_or_else(|| h.home.join(".codex"));
+    (h.codex_home.is_some() || codex.is_dir()).then_some(codex)
+}
+
+/// Every Claude Code config dir, in order: `~/.claude`,
+/// `$CLAUDE_CONFIG_DIR`, then each live `~/.claude-*` sibling. Two
+/// spellings of one dir may both appear; callers dedupe by file.
+fn claude_dirs(h: &Homes) -> Vec<PathBuf> {
     let mut dirs = vec![h.home.join(".claude")];
     dirs.extend(h.claude_config_dir.clone());
     let mut siblings: Vec<PathBuf> = std::fs::read_dir(&h.home)
@@ -144,31 +181,7 @@ pub fn user_targets(h: &Homes) -> Vec<Target> {
         .collect();
     siblings.sort();
     dirs.extend(siblings);
-    let mut out: Vec<Target> = Vec::new();
-    for d in dirs {
-        let path = d.join("settings.json");
-        if !out.iter().any(|t| same_file(&t.path, &path)) {
-            out.push(Target {
-                path,
-                format: Format::Json,
-                harness: "claude",
-                fix: user_fix(),
-            });
-        }
-    }
-    let codex = h
-        .codex_home
-        .clone()
-        .unwrap_or_else(|| h.home.join(".codex"));
-    if h.codex_home.is_some() || codex.is_dir() {
-        out.push(Target {
-            path: codex.join("config.toml"),
-            format: Format::Toml,
-            harness: "codex",
-            fix: user_fix(),
-        });
-    }
-    out
+    dirs
 }
 
 /// The per-repo files a harness reads hooks from — what releases up to
@@ -878,6 +891,12 @@ fn read(path: &Path) -> Result<Option<String>, String> {
 /// hardlinked config ends up a separate file (the rename replaces the
 /// link, not the shared inode).
 fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    write_atomic_mode(path, text, 0o600)
+}
+
+/// [`write_atomic`] with the mode a new file gets: 0600 suits a config
+/// (it may hold secrets), 0644 a skill (it is documentation).
+fn write_atomic_mode(path: &Path, text: &str, new_mode: u32) -> Result<(), String> {
     let shown = path.display();
     let real = match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => path
@@ -899,7 +918,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     let mode = {
         use std::os::unix::fs::PermissionsExt;
         meta.as_ref()
-            .map_or(0o600, |m| m.permissions().mode() & 0o7777)
+            .map_or(new_mode, |m| m.permissions().mode() & 0o7777)
     };
     // a temp file a crashed run left under this pid is ours to replace
     let _ = std::fs::remove_file(&tmp);
@@ -1084,6 +1103,7 @@ fn install_user(strip_tracked: bool, check: bool, print: bool) -> bool {
     if let Some(root) = &root {
         results.extend(project_copies(root, check, strip_tracked, tracked));
     }
+    results.extend(skill_status(&homes));
     let ok = report(results);
     if !check && ok {
         let mut harnesses: Vec<&str> = targets.iter().map(|t| t.harness).collect();
@@ -1135,7 +1155,9 @@ fn install_project(fabric: Fabric, check: bool, print: bool) -> bool {
 
 /// The peat skill: the judgment half (when to read, how to deposit, how
 /// far to trust a line), shipped inside the binary so a project install
-/// can lay it beside the hooks and `peat skill` can print it.
+/// can lay it beside the hooks, `peat skill --user` can write it for the
+/// user and `peat skill` can print it. The nix package installs the same
+/// file at `share/peat/skills/peat/SKILL.md` for the home-manager module.
 pub const SKILL: &str = include_str!("../skills/peat/SKILL.md");
 
 /// Where each harness discovers project skills.
@@ -1156,7 +1178,7 @@ pub fn install_skill(root: &Path, fabric: Fabric, check: bool) -> Result<Option<
         return match current.as_deref() {
             Some(SKILL) => Ok(Some(format!("✓ {}: current", path.display()))),
             None => Ok(Some(format!(
-                "- {}: not in this desk (`peat skill` prints it)",
+                "- {}: not in this desk (the user-level skill serves it; `peat hook install --check` reports it)",
                 path.display()
             ))),
             Some(_) => Err(format!(
@@ -1169,8 +1191,159 @@ pub fn install_skill(root: &Path, fabric: Fabric, check: bool) -> Result<Option<
     if current.as_deref() == Some(SKILL) {
         return Ok(Some(format!("= {}: already current", path.display())));
     }
-    write_atomic(&path, SKILL)?;
+    write_atomic_mode(&path, SKILL, 0o644)?;
     Ok(Some(format!("✓ {}: written", path.display())))
+}
+
+/// One harness's user-level skill: every file it reads the peat skill
+/// from, the one `peat skill --user` writes first.
+pub struct UserSkill {
+    pub harness: &'static str,
+    pub paths: Vec<SkillPath>,
+}
+
+/// A skill file under the dir peat treats as given (a Claude config dir,
+/// `~`, `$CODEX_HOME`); only the components below `root` are peat's to
+/// judge, so a symlinked home or `/var` → `/private/var` never counts.
+pub struct SkillPath {
+    pub root: PathBuf,
+    pub file: PathBuf,
+}
+
+impl SkillPath {
+    fn new(root: &Path, rel: &str) -> SkillPath {
+        SkillPath {
+            root: root.to_path_buf(),
+            file: root.join(rel),
+        }
+    }
+
+    /// Whether the file, or any dir between it and `root`, is a symlink:
+    /// managed elsewhere (home-manager's store links, or a config dir's
+    /// `skills` linked into a shared hub), never written through.
+    fn linked(&self) -> bool {
+        self.file
+            .ancestors()
+            .take_while(|a| *a != self.root)
+            .any(|a| std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()))
+    }
+}
+
+/// Where each harness on this machine reads a user-level skill: `skills/`
+/// in every Claude Code config dir that exists, and for Codex (when set
+/// up) the shared `~/.agents/skills`, then `$CODEX_HOME/skills`.
+pub fn user_skills(h: &Homes) -> Vec<UserSkill> {
+    let mut out: Vec<UserSkill> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for d in claude_dirs(h) {
+        let skills = d.join("skills");
+        if !d.is_dir() || seen.iter().any(|s| same_file(s, &skills)) {
+            continue;
+        }
+        out.push(UserSkill {
+            harness: "Claude Code",
+            paths: vec![SkillPath::new(&d, "skills/peat/SKILL.md")],
+        });
+        seen.push(skills);
+    }
+    if let Some(codex) = codex_home(h) {
+        out.push(UserSkill {
+            harness: "Codex",
+            paths: vec![
+                SkillPath::new(&h.home, ".agents/skills/peat/SKILL.md"),
+                SkillPath::new(&codex, "skills/peat/SKILL.md"),
+            ],
+        });
+    }
+    out
+}
+
+/// How to get a user-level skill.
+const SKILL_FIX: &str =
+    "home-manager: programs.peat.skill.enable = true; otherwise run: peat skill --user";
+
+/// The user-level skill, reported for `peat hook install [--check]`: a
+/// note per harness, never drift. The hooks capture without it, and a
+/// copy home-manager installed from another peat build differs from this
+/// binary's by design, so neither may turn the check red.
+pub fn skill_status(h: &Homes) -> Vec<Result<Option<String>, String>> {
+    let mut out = Vec::new();
+    for s in user_skills(h) {
+        let mut found = false;
+        for p in s.paths.iter().map(|p| &p.file) {
+            let line = match read(p) {
+                Ok(None) => continue,
+                Ok(Some(t)) if t == SKILL => format!("✓ {}: peat skill current", p.display()),
+                Ok(Some(_)) => format!(
+                    "- {}: peat skill differs from this peat's — home-manager: rebuild after upgrading peat; otherwise run: peat skill --user",
+                    p.display()
+                ),
+                Err(e) => format!("- {e}"),
+            };
+            found = true;
+            out.push(Ok(Some(line)));
+        }
+        if !found {
+            out.push(Ok(Some(format!(
+                "- {}: no peat skill for {} — {SKILL_FIX}",
+                s.paths[0].file.display(),
+                s.harness
+            ))));
+        }
+    }
+    out
+}
+
+/// `peat skill --user`'s writes, one per harness, so no harness ever
+/// reads two peat skills: a current copy anywhere is left as it is; a
+/// path that is or sits in a symlink (below its root) means the skill is
+/// managed elsewhere — home-manager's store links, a `skills` dir linked
+/// into a shared hub — and the harness gets nothing; an existing regular
+/// copy is rewritten in place; only a harness with no copy at all gets a
+/// new file, at its first path.
+pub fn write_user_skills(h: &Homes) -> Vec<Result<Option<String>, String>> {
+    let skills = user_skills(h);
+    if skills.is_empty() {
+        return vec![Err(format!(
+            "no Claude Code or Codex config dir under {}; nothing to write",
+            h.home.display()
+        ))];
+    }
+    skills
+        .into_iter()
+        .map(|s| {
+            let holds = |p: &&SkillPath| std::fs::symlink_metadata(&p.file).is_ok();
+            if let Some(p) = s
+                .paths
+                .iter()
+                .find(|p| read(&p.file).ok().flatten().as_deref() == Some(SKILL))
+            {
+                return Ok(Some(format!("= {}: already current", p.file.display())));
+            }
+            if let Some(p) = s.paths.iter().find(|p| p.linked()) {
+                return Ok(Some(format!(
+                    "- {}: a symlink, managed elsewhere (e.g. home-manager's programs.peat.skill); {} left alone",
+                    p.file.display(),
+                    s.harness
+                )));
+            }
+            let path = &s.paths.iter().find(holds).unwrap_or(&s.paths[0]).file;
+            write_atomic_mode(path, SKILL, 0o644)?;
+            Ok(Some(format!("✓ {}: written", path.display())))
+        })
+        .collect()
+}
+
+/// `peat skill --user`: the user-level skill for machines without the
+/// home-manager module.
+pub fn skill_user_cli() {
+    let Some(homes) = Homes::from_env() else {
+        crate::ui::error("HOME is not set; cannot find the user-level skill dirs");
+        std::process::exit(1);
+    };
+    if !report(write_user_skills(&homes)) {
+        std::process::exit(1);
+    }
 }
 
 /// Create the ledger at `path` if absent (opening creates it, its
@@ -1562,6 +1735,137 @@ hooks = [{ type = "command", command = "in=$(cat); nohup peat capture \"$TP\" &"
         );
         assert!(SKILL.starts_with("---\nname: peat\n"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn lines(rs: Vec<Result<Option<String>, String>>) -> Vec<String> {
+        rs.into_iter().map(|r| r.unwrap().unwrap()).collect()
+    }
+
+    #[test]
+    fn user_skill_is_found_per_harness_and_written_once() {
+        let home = tmp("user-skill");
+        for d in [".claude", ".claude-work/projects", ".codex"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join(".claude-work/settings.json"), "{}").unwrap();
+        let h = Homes {
+            // a second spelling of ~/.claude is one harness, not two
+            claude_config_dir: Some(home.join(".claude/../.claude")),
+            ..homes(&home)
+        };
+        let names: Vec<_> = user_skills(&h)
+            .iter()
+            .map(|s| s.paths[0].file.clone())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                home.join(".claude/skills/peat/SKILL.md"),
+                home.join(".claude-work/skills/peat/SKILL.md"),
+                home.join(".agents/skills/peat/SKILL.md"),
+            ]
+        );
+        let none = lines(skill_status(&h));
+        assert_eq!(none.len(), 3, "{none:?}");
+        assert!(
+            none.iter()
+                .all(|l| l.starts_with("- ") && l.contains("programs.peat.skill.enable")),
+            "a missing skill is a note naming the fix: {none:?}"
+        );
+        let wrote = lines(write_user_skills(&h));
+        assert!(wrote.iter().all(|l| l.starts_with("✓ ")), "{wrote:?}");
+        for p in &names {
+            assert_eq!(std::fs::read_to_string(p).unwrap(), SKILL);
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "a skill is not secret: {}", p.display());
+        }
+        assert!(lines(skill_status(&h)).iter().all(|l| l.starts_with("✓ ")));
+        assert!(
+            lines(write_user_skills(&h))
+                .iter()
+                .all(|l| l.starts_with("= "))
+        );
+        // a copy from another peat build is reported, never drift
+        std::fs::write(&names[1], "older").unwrap();
+        let status = skill_status(&h);
+        assert!(status.iter().all(Result::is_ok));
+        assert!(lines(status)[1].contains("differs"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_reads_either_skill_dir_and_a_linked_one_is_left_alone() {
+        let home = tmp("user-skill-codex");
+        std::fs::create_dir_all(home.join(".codex/skills/peat")).unwrap();
+        std::fs::write(home.join(".codex/skills/peat/SKILL.md"), SKILL).unwrap();
+        let h = homes(&home);
+        assert_eq!(
+            lines(skill_status(&h)),
+            [format!(
+                "✓ {}: peat skill current",
+                home.join(".codex/skills/peat/SKILL.md").display()
+            )],
+            "~/.claude absent: no Claude Code skill expected"
+        );
+        assert!(lines(write_user_skills(&h))[0].starts_with("= "));
+        assert!(!home.join(".agents").exists());
+        // home-manager's shape: the skill dir is a symlink into the store
+        std::fs::remove_dir_all(home.join(".codex/skills")).unwrap();
+        let store = home.join("store/peat");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("SKILL.md"), "another build").unwrap();
+        std::fs::create_dir_all(home.join(".agents/skills")).unwrap();
+        std::os::unix::fs::symlink(&store, home.join(".agents/skills/peat")).unwrap();
+        let wrote = lines(write_user_skills(&h));
+        assert!(wrote[0].contains("left alone"), "{wrote:?}");
+        assert_eq!(
+            std::fs::read_to_string(store.join("SKILL.md")).unwrap(),
+            "another build"
+        );
+        // home-manager links ~/.codex/skills/peat and ~/.agents is absent:
+        // Codex already has a peat skill, so --user creates no second one
+        std::fs::remove_dir_all(home.join(".agents")).unwrap();
+        std::fs::create_dir_all(home.join(".codex/skills")).unwrap();
+        std::os::unix::fs::symlink(&store, home.join(".codex/skills/peat")).unwrap();
+        let wrote = lines(write_user_skills(&h));
+        assert!(wrote[0].contains("left alone"), "{wrote:?}");
+        assert!(!home.join(".agents").exists(), "{wrote:?}");
+        // a stale regular copy there is rewritten in place, still one copy
+        std::fs::remove_file(home.join(".codex/skills/peat")).unwrap();
+        std::fs::create_dir_all(home.join(".codex/skills/peat")).unwrap();
+        std::fs::write(home.join(".codex/skills/peat/SKILL.md"), "older").unwrap();
+        let wrote = lines(write_user_skills(&h));
+        assert!(wrote[0].starts_with("✓ "), "{wrote:?}");
+        assert_eq!(
+            std::fs::read_to_string(home.join(".codex/skills/peat/SKILL.md")).unwrap(),
+            SKILL
+        );
+        assert!(!home.join(".agents").exists(), "{wrote:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_claude_skills_dir_linked_into_a_hub_is_never_written_through() {
+        let home = tmp("user-skill-hub");
+        let hub = home.join("hub");
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        // the shape claude-config tracks: ~/.claude/skills → a shared hub
+        std::os::unix::fs::symlink(&hub, home.join(".claude/skills")).unwrap();
+        let wrote = lines(write_user_skills(&homes(&home)));
+        assert!(wrote[0].contains("left alone"), "{wrote:?}");
+        assert!(!hub.join("peat").exists(), "{wrote:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_harness_means_nothing_to_write() {
+        let home = tmp("user-skill-none");
+        let h = homes(&home);
+        assert!(skill_status(&h).is_empty());
+        assert!(write_user_skills(&h)[0].is_err());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

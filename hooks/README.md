@@ -46,6 +46,24 @@ It also writes the peat skill to `.claude/skills/peat/SKILL.md` (`--codex`: `.ag
 
 Verified against the Claude Code hooks docs (2026-08-16) and Codex ≥0.148. There are no `$CLAUDE_TRANSCRIPT_PATH` / `$CLAUDE_SESSION_ID` environment variables; hooks receive **stdin JSON**.
 
+## The skill: user-level, matching the installed peat
+
+The hooks capture; the skill (`skills/peat/SKILL.md`) tells an agent when to read what was captured. It belongs where the hooks are, once per machine, and should be the copy that ships with the installed binary. Only `--project` writes it into a desk; a user-level install never does, so no copy lands in a desk's working change.
+
+- **home-manager:** the package installs the skill at `$out/share/peat/skills/peat/SKILL.md`, and the module links that directory into each home-relative target, so an upgrade of peat upgrades the skill:
+
+  ```nix
+  programs.peat.enable = true;
+  programs.peat.skill.enable = true;
+  # default targets: [ ".agents/skills/peat" ".claude/skills/peat" ]
+  programs.peat.skill.targets = [ ".agents/skills/peat" ".claude/skills/peat" ".claude-work/skills/peat" ];
+  ```
+
+  Codex reads `~/.agents/skills` (and `$CODEX_HOME/skills`); Claude Code reads `skills/` in its config dir, so each extra `CLAUDE_CONFIG_DIR` needs its own target. `skill.enable` is off by default, like the other modules on this pattern (anneal, ferry, hail): Home Manager refuses to replace a real file, so a machine that ran `peat skill --user` deletes those copies before switching.
+- **without nix:** `peat skill --user` writes the skill to `skills/peat/SKILL.md` in every Claude Code config dir that exists (the same dirs install wires) and, when Codex is set up, to `~/.agents/skills/peat/SKILL.md` — atomically like the configs, mode 0644. Each harness ends with one copy, never two: one that already reads a current copy is left as it is; one whose skill path anywhere below its config dir (or `~` for `.agents`) is a symlink — home-manager's store links, or a `skills/` dir linked into a shared hub — is left alone entirely; an existing regular copy (in `~/.agents/skills` or `$CODEX_HOME/skills` for Codex) is rewritten in place; only a harness with no copy gets a new file. Run it again after an upgrade.
+
+`peat hook install` and `peat hook install --check` report the skill per harness: `✓` for a current copy, a note for a copy that differs from this binary's (another peat build installed it — expected while running a development binary beside a home-manager one) and a note naming both ways to get one when a harness has none. These are notes, never drift: `--check` does not fail over the skill.
+
 ## What `peat hook` does at each moment
 
 | stdin `hook_event_name` | does |

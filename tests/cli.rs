@@ -174,6 +174,54 @@ fn project_install_is_the_old_per_repo_form() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// The skill is user-level: install reports it and never writes it,
+/// `--check` stays green without it, and `peat skill --user` writes it.
+#[test]
+fn user_skill_is_reported_by_install_and_written_by_skill_user() {
+    let home = tmp("skill");
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let o = run(&home, &home, &["hook", "install"]);
+    assert!(o.status.success(), "{}", text(&o));
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("no peat skill for Claude Code")
+            && out.contains("no peat skill for Codex")
+            && out.contains("peat skill --user"),
+        "{}",
+        text(&o)
+    );
+    assert!(
+        !home.join(".claude/skills").exists(),
+        "install writes no skill"
+    );
+    let check = run(&home, &home, &["hook", "install", "--check"]);
+    assert!(
+        check.status.success(),
+        "a missing skill is not drift: {}",
+        text(&check)
+    );
+    let w = run(&home, &home, &["skill", "--user"]);
+    assert!(w.status.success(), "{}", text(&w));
+    let printed = run(&home, &home, &["skill"]).stdout;
+    for p in [
+        ".claude/skills/peat/SKILL.md",
+        ".agents/skills/peat/SKILL.md",
+    ] {
+        assert_eq!(std::fs::read(home.join(p)).unwrap(), printed, "{p}");
+    }
+    let check = run(&home, &home, &["hook", "install", "--check"]);
+    assert!(check.status.success(), "{}", text(&check));
+    assert_eq!(
+        String::from_utf8_lossy(&check.stdout)
+            .matches("peat skill current")
+            .count(),
+        2,
+        "{}",
+        text(&check)
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[test]
 fn init_creates_the_ledger_once_and_reads_require_it() {
     let home = tmp("init");

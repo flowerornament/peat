@@ -70,7 +70,11 @@ fn main() {
             install::install_cli(project.then_some(fabric), strip_project, check, print);
             return;
         }
-        Some(Cmd::Skill) => {
+        Some(Cmd::Skill { user: true }) => {
+            install::skill_user_cli();
+            return;
+        }
+        Some(Cmd::Skill { user: false }) => {
             print!("{}", install::SKILL);
             return;
         }
@@ -238,7 +242,7 @@ fn main() {
         }
         Cmd::Compact => cmd::capture::compact(&mut st),
         Cmd::Asof { date, task, json } => cmd::asof::asof(st, date, task, json),
-        Cmd::Hook { .. } | Cmd::Skill | Cmd::Init => {
+        Cmd::Hook { .. } | Cmd::Skill { .. } | Cmd::Init => {
             unreachable!("handled before the ledger opens")
         }
     }

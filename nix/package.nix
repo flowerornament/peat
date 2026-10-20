@@ -35,6 +35,12 @@ pkgs.rustPlatform.buildRustPackage {
     cp ${eseTokenizer} "$CARGO_TARGET_DIR/ese-cache/tokenizer.json"
   '';
 
+  # the agent skill ships with the binary that matches it, so the
+  # home-manager module's programs.peat.skill links this exact copy
+  postInstall = ''
+    install -Dm644 skills/peat/SKILL.md "$out/share/peat/skills/peat/SKILL.md"
+  '';
+
   # the oracle twin is red-capable by design: `--ignored` must FAIL, so the
   # default filter is exactly right; keep checks to the green suite
   checkFlags = [ ];

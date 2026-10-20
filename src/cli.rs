@@ -183,9 +183,17 @@ pub enum Cmd {
         json: bool,
     },
     /// Print the peat skill (when to look things up, how far to trust a
-    /// line). `peat hook install --project` lays it beside the per-repo
-    /// hooks where the harness discovers it
-    Skill,
+    /// line). The skill belongs at user level, matching the installed
+    /// peat: the home-manager module's programs.peat.skill links it, and
+    /// `--user` writes it for machines without that.
+    /// `peat hook install --project` lays a copy beside per-repo hooks
+    Skill {
+        /// Write it to every Claude Code config dir's skills/peat/ and
+        /// (when Codex is set up) ~/.agents/skills/peat/, one copy per
+        /// harness, leaving symlinked (home-manager, hub) skills alone
+        #[arg(long)]
+        user: bool,
+    },
     /// Opt this repo in: create its ledger (`.peat/db` at the repo root;
     /// in a jj workspace or git worktree, the anchor repo's, which every
     /// desk shares). Idempotent. The user-level hook records only where a
