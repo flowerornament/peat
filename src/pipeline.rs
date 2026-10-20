@@ -23,9 +23,17 @@ use crate::event::{Basis, Envelope, Event, EventId};
 
 pub const DAY_MS: u64 = 86_400_000;
 
+/// The day digest's bucket width. The fold keys activity by quarter-hour
+/// slot of UTC time (`ts_ms / SLOT_MS`), never by day: which calendar day
+/// an instant belongs to depends on the reader's UTC offset, and that
+/// enters only at render, where `ladder::local_days` regroups the slots.
+/// Every UTC offset in use is a whole number of quarter hours, so each
+/// slot lies inside exactly one local day.
+pub const SLOT_MS: u64 = 15 * 60_000;
+
 // ---------------------------------------------------------------- rows
 
-/// One event's contribution to its day bucket.
+/// One event's contribution to its quarter-hour slot.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct DayDelta {
     pub session_start: bool,
@@ -35,7 +43,8 @@ pub struct DayDelta {
     pub file: Option<String>,
 }
 
-/// Materialized per-day digest.
+/// Materialized digest of one quarter-hour slot (the `days` view, keyed by
+/// slot); at render, a local day's digest is the sum of its slots.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct DayStats {
     pub sessions: i64,
@@ -121,7 +130,7 @@ pub fn day_delta(k: &Keyed<EventId, Envelope>) -> Option<Keyed<u64, DayDelta>> {
         },
         _ => return None,
     };
-    Some(Keyed::new(e.ts_ms / DAY_MS, d))
+    Some(Keyed::new(e.ts_ms / SLOT_MS, d))
 }
 
 pub fn day_step(acc: &mut DayStats, v: &DayDelta, delta: isize) {

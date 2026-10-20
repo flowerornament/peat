@@ -1,31 +1,33 @@
 //! `peat <window>`: one window of time — its extractive digest, the
 //! children one rung finer, and what was said inside it.
 
-use crate::db::{self, Db};
+use crate::db::Db;
 use crate::event::{Envelope, Event, EventId};
-use crate::pipeline::{DAY_MS, ObsRow, SessStats, SubjStats};
+use crate::ladder::{local_day, local_days, window_ms};
+use crate::pipeline::{ObsRow, SessStats, SubjStats};
 use crate::ui::{self, age_label, clip, short_sess};
 
-pub fn zoom(st: &Db, window: String, json: bool) {
-    let now = db::now_ms();
-    let now_bucket = now / DAY_MS;
+/// `now` and `offset_ms` (the reader's UTC offset) come from the render
+/// boundary: windows are the reader's local days.
+pub fn zoom(st: &Db, window: String, json: bool, now: u64, offset_ms: i64) {
+    let now_bucket = local_day(now, offset_ms);
     let Some((start, end, label)) = crate::ladder::parse_window(&window, now_bucket) else {
         ui::error(&format!(
             "not a window: {window:?} (want w33, 2026-w33, 2026-07, 2026-08-14, q3, 2026, or a..b)"
         ));
         std::process::exit(1);
     };
-    let lo_ms = start * DAY_MS;
-    let hi_ms = (end + 1) * DAY_MS;
+    let (lo_ms, hi_ms) = window_ms(start, end, offset_ms);
     let (head, kids, sess_rows, finals, obs) =
         st.rtx(|(days, _, _, (subjects, evidence), sessions, ledger)| {
-            let day_rows: std::collections::BTreeMap<u64, crate::pipeline::DayStats> =
-                days.iter().collect();
+            let day_rows = local_days(days.iter(), offset_ms);
             let mut obs_per_day: std::collections::BTreeMap<u64, i64> = Default::default();
             let mut obs_rows: Vec<(String, ObsRow)> = Vec::new();
             for (name, _) in subjects.iter().collect::<Vec<(String, SubjStats)>>() {
                 for r in evidence.get(&name) {
-                    *obs_per_day.entry(r.ts_ms / DAY_MS).or_default() += 1;
+                    *obs_per_day
+                        .entry(local_day(r.ts_ms, offset_ms))
+                        .or_default() += 1;
                     if (lo_ms..hi_ms).contains(&r.ts_ms) {
                         obs_rows.push((name.clone(), r));
                     }
@@ -76,6 +78,8 @@ pub fn zoom(st: &Db, window: String, json: bool) {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "window": label, "start_day": start, "end_day": end,
+                // the local days above are this offset from UTC
+                "utc_offset_min": offset_ms / 60_000,
                 "digest": head, "children": kids,
                 "sessions": sess_rows.iter().map(|(id, s)| serde_json::json!({
                     "session": short_sess(id), "cwd": s.cwd, "branch": s.branch,

@@ -13,11 +13,50 @@
 //! the exact command that opens it. `now` enters only at the read
 //! boundary; same day rows + same `now` + same budget → same bands.
 //!
-//! Day buckets are UTC (`ts_ms / DAY_MS`), consistent with the digest.
+//! Day buckets are the reader's local days: the fold stores quarter-hour
+//! slots of UTC time, and [`local_days`] regroups them under the UTC
+//! offset the caller passes in (read once at the render boundary). Every
+//! reading surface — brief, ladder, zoom, window parsing — uses the same
+//! offset, so `peat 2026-10-18` counts what the brief called that day.
+//! The current offset applies to all history: across a daylight-saving
+//! change, older day edges sit an hour off.
 
 use std::collections::BTreeMap;
 
-use crate::pipeline::DayStats;
+use crate::pipeline::{DAY_MS, DayStats, SLOT_MS};
+
+// ---------------------------------------------------------------- local days
+
+/// The local day (bucket index) holding instant `ts_ms` at UTC offset
+/// `offset_ms`.
+pub fn local_day(ts_ms: u64, offset_ms: i64) -> u64 {
+    (ts_ms as i64).saturating_add(offset_ms).max(0) as u64 / DAY_MS
+}
+
+/// The UTC instants `[lo, hi)` covered by local days `start..=end`.
+pub fn window_ms(start: u64, end: u64, offset_ms: i64) -> (u64, u64) {
+    let utc = |day: u64| ((day * DAY_MS) as i64 - offset_ms).max(0) as u64;
+    (utc(start), utc(end + 1))
+}
+
+/// Regroup the `days` view's quarter-hour slot rows into local-day rows.
+pub fn local_days(
+    slots: impl IntoIterator<Item = (u64, DayStats)>,
+    offset_ms: i64,
+) -> BTreeMap<u64, DayStats> {
+    let mut out: BTreeMap<u64, DayStats> = BTreeMap::new();
+    for (slot, s) in slots {
+        let d = out.entry(local_day(slot * SLOT_MS, offset_ms)).or_default();
+        d.sessions += s.sessions;
+        d.tools += s.tools;
+        d.fails += s.fails;
+        d.commits += s.commits;
+        for (f, n) in s.files {
+            *d.files.entry(f).or_default() += n;
+        }
+    }
+    out
+}
 
 // ---------------------------------------------------------------- civil days
 

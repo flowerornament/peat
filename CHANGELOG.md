@@ -8,6 +8,11 @@ Entries prefixed **Hooks:** touch the hook contract. Since 0.4.0 every hook is t
 
 - **`peat … | head` ends quietly.** A reader that closes the pipe early used to make peat panic (`failed printing to stdout: Broken pipe`, exit 101); every verb now ends the way a Unix filter does, by SIGPIPE (exit 141), with nothing on stderr. (peat-8dq)
 - **Hooks: `peat hook` always exits 0 on a closed stream.** The SessionStart brief, the busy-ledger fallback line and every stderr notice drop write errors instead of panicking, so a harness that stops reading stdout or closes stderr never sees a failed hook. (peat-8dq)
+- **Days are your local days, everywhere.** The brief's date was local while its day list, the ladder, `peat <day|week|…>` windows and their counts were UTC days, so late-evening work west of UTC (or early-morning work east of it) showed up on the wrong day: `peat w42` read 0 tools while the brief's today read 101. The fold now buckets activity by UTC quarter-hour and every reading surface regroups those into local days under the UTC offset read at render time; the fold itself still never sees a clock or a timezone. `peat <window> --json` gains `utc_offset_min`, and its `start_day`/`end_day` are local-day indices. The current offset applies to all history, so across a daylight-saving change older day edges sit an hour off. (peat-cgp)
+
+Upgrading:
+
+- The first run of the new binary rebuilds the views from the ledger once (view schema v3), about a minute on a large ledger; the previous db is kept at `db.old`.
 
 ## 0.5.0 — 2026-10-18
 

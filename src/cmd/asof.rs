@@ -38,6 +38,7 @@ pub fn asof(st: Db, date: String, task: Vec<String>, json: bool) {
         &past,
         &task.join(" "),
         cutoff,
+        crate::transcript::local_offset_ms(),
         crate::brief::budget(None),
         &crate::brief::desk(),
     );

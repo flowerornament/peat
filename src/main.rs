@@ -32,7 +32,6 @@ pub mod vcs;
 use clap::Parser;
 
 use cli::{Cli, Cmd, HookCmd};
-use pipeline::DAY_MS;
 
 fn main() {
     let cli = Cli::parse();
@@ -91,6 +90,9 @@ fn main() {
     };
 
     let mut st = db::open_db(db::db_path());
+    // the reader's UTC offset: what "a day" means on every reading surface
+    // (render boundary only — the fold buckets UTC quarter-hours)
+    let offset_ms = std::cell::LazyCell::new(transcript::local_offset_ms);
 
     // ---- shape dispatch: bare `peat` orients; `peat <thing>` looks
     // closer, inferring window / session / subject / ref / search from the
@@ -107,7 +109,7 @@ fn main() {
         },
         None => {
             let q = &cli.query;
-            let now_bucket = db::now_ms() / DAY_MS;
+            let now_bucket = ladder::local_day(db::now_ms(), *offset_ms);
             // a hex prefix names a session only when one has it; otherwise
             // it may be a commit, tried below as a ref
             let is_sess = |s: &str| {
@@ -184,6 +186,7 @@ fn main() {
                 &st,
                 &task.join(" "),
                 db::now_ms(),
+                *offset_ms,
                 brief::budget(budget),
                 &brief::desk(),
             );
@@ -199,7 +202,7 @@ fn main() {
         Cmd::Events { filter, json } => cmd::events::events(&st, filter, json),
         Cmd::Subjects { json } => cmd::recall::subjects(&st, json),
         Cmd::Show { session, seq } => cmd::show::show(&st, session, seq),
-        Cmd::Zoom { window, json } => cmd::zoom::zoom(&st, window, json),
+        Cmd::Zoom { window, json } => cmd::zoom::zoom(&st, window, json, db::now_ms(), *offset_ms),
         Cmd::Ref { target, json } => {
             let desk = brief::desk();
             let resolved = cmd::refs::classify(&target, &desk)

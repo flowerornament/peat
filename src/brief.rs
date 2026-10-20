@@ -12,7 +12,7 @@ use crate::db::Db;
 use crate::event::EventId;
 use crate::ladder;
 use crate::pipeline::{DAY_MS, DayStats, ObsRow, SessStats};
-use crate::transcript::{date_label, local_offset_ms};
+use crate::transcript::date_label;
 use crate::ui::{self, age_label, short_path, short_sess};
 
 /// Reciprocal-rank-fusion constant (value from the original RRF paper).
@@ -76,13 +76,24 @@ pub struct Brief {
 
 /// Assemble the brief from one snapshot of the ledger. `desk` is the
 /// directory this desk works in, so "last session" means this desk's.
-pub fn assemble(st: &Db, query: &str, now: u64, budget: usize, desk: &std::path::Path) -> Brief {
+/// `offset_ms` is the reader's UTC offset: days are the reader's local
+/// days (see `ladder::local_days`).
+pub fn assemble(
+    st: &Db,
+    query: &str,
+    now: u64,
+    offset_ms: i64,
+    budget: usize,
+    desk: &std::path::Path,
+) -> Brief {
     st.rtx(
         |(days, files, (kw, vec, texts), (subjects, evidence), sessions, _)| {
-            let today_bucket = now / DAY_MS;
+            let today_bucket = ladder::local_day(now, offset_ms);
 
             // ---- day digest: the 3 most recent non-empty days
-            let mut day_rows: Vec<(u64, DayStats)> = days.iter().collect();
+            let mut day_rows: Vec<(u64, DayStats)> = ladder::local_days(days.iter(), offset_ms)
+                .into_iter()
+                .collect();
             day_rows.sort_by_key(|(d, _)| std::cmp::Reverse(*d));
 
             // ---- further back: the ladder over everything the digest doesn't show.
@@ -95,7 +106,9 @@ pub fn assemble(st: &Db, query: &str, now: u64, budget: usize, desk: &std::path:
             for (subject, _) in subjects.iter() {
                 for r in evidence.get(&subject) {
                     let r: ObsRow = r;
-                    *obs_per_day.entry(r.ts_ms / DAY_MS).or_default() += 1;
+                    *obs_per_day
+                        .entry(ladder::local_day(r.ts_ms, offset_ms))
+                        .or_default() += 1;
                 }
             }
             let frontier = match day_rows.len() {
@@ -202,7 +215,7 @@ pub fn assemble(st: &Db, query: &str, now: u64, budget: usize, desk: &std::path:
             Brief {
                 // the caller's local calendar date, computed from the same civil-
                 // days math as the rest of the tool (no subprocess)
-                today: date_label((now as i64 + local_offset_ms()) as u64),
+                today: date_label((now as i64 + offset_ms) as u64),
                 active,
                 days: days_out,
                 further,

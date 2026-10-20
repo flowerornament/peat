@@ -273,8 +273,9 @@ pub fn now_ms() -> u64 {
 /// the current pipeline into a fresh database that replaces the old one.
 ///
 /// History: 1 = v0.1.x shapes (implicit — no marker file);
-/// 2 = `ObsRow`/`SubjStats` carry the deposit-time `Basis`.
-pub const VIEW_VERSION: u32 = 2;
+/// 2 = `ObsRow`/`SubjStats` carry the deposit-time `Basis`;
+/// 3 = the `days` view is keyed by quarter-hour slot, not UTC day.
+pub const VIEW_VERSION: u32 = 3;
 
 /// A path beside the db dir: `.peat/db` → `.peat/db<suffix>`.
 pub fn beside(db: &std::path::Path, suffix: &str) -> PathBuf {

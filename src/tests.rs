@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use fold::stream::KeyedStream;
 
 use crate::event::{Envelope, Event, EventId, OBS_SEQ_BASE};
-use crate::pipeline::{DAY_MS, DayStats, SubjStats};
+use crate::pipeline::{DAY_MS, DayStats, SLOT_MS, SubjStats};
 
 fn tmp() -> std::path::PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -208,7 +208,7 @@ fn predict(prefix: &[(EventId, Envelope)]) -> (DayPrediction, SubjPrediction) {
     for (id, e) in prefix {
         match &e.kind {
             Event::ToolCall { ok, .. } => {
-                let d = days.entry(e.ts_ms / DAY_MS).or_default();
+                let d = days.entry(e.ts_ms / SLOT_MS).or_default();
                 d.0 += 1;
                 d.1 += i64::from(!ok);
             }
@@ -626,7 +626,10 @@ fn view_rebuild_replays_the_ledger() {
     let marker = crate::db::beside(&dir, ".view-version");
     std::fs::write(&marker, "1\n").unwrap();
     crate::db::migrate_views(&dir);
-    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "2");
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().trim(),
+        crate::db::VIEW_VERSION.to_string()
+    );
     assert!(crate::db::beside(&dir, ".old").exists(), "previous db kept");
     let st = open(&dir);
     let (head, ledger_len) = st.rtx(|(_, _, _, (subjects, _), _, ledger)| {
@@ -821,5 +824,129 @@ fn agent_brief_never_passes_off_an_older_session_as_the_last() {
         stale,
         format!("{}\n", crate::brief::LOOKUP_LINE),
         "older than three days"
+    );
+}
+
+// ---------------------------------------------------------------- local days
+
+/// Days are the reader's local days on every surface: the brief's "today",
+/// its day digest, and a zoomed window all count the same events, under
+/// the UTC offset passed in at the render boundary (never read from the
+/// environment here). Late-evening work west of UTC lands on its local
+/// day, not on the UTC day after.
+#[test]
+fn days_are_local_on_every_reading_surface() {
+    let at = |iso: &str| crate::transcript::iso_to_ms(iso).unwrap();
+    let pdt = -7 * 3_600_000i64; // UTC-07:00
+    let path = tmp();
+    {
+        let mut st = crate::db::open(path.clone(), crate::pipeline::pipeline);
+        st.wtx(|tx| {
+            // local 2026-10-18 05:00, then 18:10..18:30 (UTC 10-19 01:xx)
+            let (id, e) = tool("s", 0, at("2026-10-18T12:00:00.000Z"), true);
+            tx.upsert(&id, &e);
+            for n in 1..4u32 {
+                let ts = at("2026-10-19T01:00:00.000Z") + u64::from(n) * 600_000;
+                let (id, e) = tool("s", n, ts, n != 2);
+                tx.upsert(&id, &e);
+            }
+            let (id, e) = obs("s", 0, at("2026-10-19T02:00:00.000Z"), "subj", "evening");
+            tx.upsert(&id, &e);
+        });
+    }
+    let st = crate::db::open(path, crate::pipeline::pipeline);
+    let now = at("2026-10-19T04:00:00.000Z"); // local 2026-10-18 21:00
+    let desk = std::path::Path::new("/desk");
+    let brief = |offset: i64| {
+        serde_json::to_value(crate::brief::assemble(&st, "", now, offset, 8, desk)).unwrap()
+    };
+    let day = |b: &serde_json::Value, i: usize| {
+        (
+            b["days"][i]["day"].as_str().unwrap().to_string(),
+            b["days"][i]["tools"].as_i64().unwrap(),
+        )
+    };
+
+    let local = brief(pdt);
+    assert_eq!(local["today"], "2026-10-18");
+    assert_eq!(local["days"].as_array().unwrap().len(), 1);
+    assert_eq!(day(&local, 0), ("today".into(), 4));
+
+    let utc = brief(0);
+    assert_eq!(utc["today"], "2026-10-19");
+    assert_eq!(day(&utc, 0), ("today".into(), 3));
+    assert_eq!(day(&utc, 1), ("yesterday".into(), 1));
+
+    // zoom's reads: `peat 2026-10-18` and `peat w42` under the same offset
+    let (slots, obs_ts): (Vec<(u64, DayStats)>, Vec<u64>) =
+        st.rtx(|(days, _, _, (_, evidence), _, _)| {
+            let ts = evidence
+                .get(&"subj".to_string())
+                .iter()
+                .map(|r: &crate::pipeline::ObsRow| r.ts_ms)
+                .collect();
+            (days.iter().collect(), ts)
+        });
+    assert_eq!(obs_ts.len(), 1);
+    let now_bucket = crate::ladder::local_day(now, pdt);
+    let day_rows = crate::ladder::local_days(slots.clone(), pdt);
+    for window in ["2026-10-18", "w42"] {
+        let (s, e, _) = crate::ladder::parse_window(window, now_bucket).unwrap();
+        let none = BTreeMap::new();
+        let d = crate::ladder::digest(
+            &day_rows,
+            &none,
+            s,
+            e,
+            window.into(),
+            String::new(),
+            String::new(),
+        );
+        assert_eq!((d.tools, d.fails), (4, 1), "{window}");
+        let (lo, hi) = crate::ladder::window_ms(s, e, pdt);
+        assert!(obs_ts.iter().all(|t| (lo..hi).contains(t)), "{window}");
+    }
+    // the UTC reading of the same day sees only the morning call
+    let (s, e, _) = crate::ladder::parse_window("2026-10-18", now_bucket).unwrap();
+    let d = crate::ladder::digest(
+        &crate::ladder::local_days(slots, 0),
+        &BTreeMap::new(),
+        s,
+        e,
+        String::new(),
+        String::new(),
+        String::new(),
+    );
+    assert_eq!(d.tools, 1);
+}
+
+/// Quarter-hour slots keep every real offset exact: at UTC+05:45 the slot
+/// starting 18:15 UTC is the first of the next local day.
+#[test]
+fn quarter_hour_offsets_split_days_exactly() {
+    let at = |iso: &str| crate::transcript::iso_to_ms(iso).unwrap();
+    let npt = (5 * 60 + 45) * 60_000i64;
+    let slot = |iso: &str| {
+        (
+            at(iso) / SLOT_MS,
+            DayStats {
+                tools: 1,
+                ..Default::default()
+            },
+        )
+    };
+    let rows = crate::ladder::local_days(
+        [
+            slot("2026-10-18T18:14:59.999Z"),
+            slot("2026-10-18T18:15:00.000Z"),
+        ],
+        npt,
+    );
+    let d18 = crate::ladder::local_day(at("2026-10-18T12:00:00.000Z"), npt);
+    assert_eq!(
+        rows.iter()
+            .map(|(d, s)| (*d - d18, s.tools))
+            .collect::<Vec<_>>(),
+        vec![(0, 1), (1, 1)]
     );
 }
