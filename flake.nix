@@ -11,7 +11,7 @@
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   outputs = { self, nixpkgs }:
     let
-      peatVersion = "0.5.0";
+      peatVersion = "0.6.0";
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
         pkgs = nixpkgs.legacyPackages.${system};
