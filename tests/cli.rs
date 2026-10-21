@@ -667,6 +667,9 @@ fn an_older_binary_refuses_newer_views() {
 /// A command that finds another process rebuilding the views waits for it
 /// only so long, then exits 75; a capture that gives up writes nothing,
 /// cursor included, so the next capture of that transcript redoes it.
+/// Debug builds only: the wait is shortened by `PEAT_TEST_MIGRATE_WAIT_SECS`,
+/// which release builds (the nix package's check phase) do not read.
+#[cfg(debug_assertions)]
 #[test]
 fn a_hung_migrator_bounds_the_wait() {
     let (home, repo) = stale_repo("hung", "3\n", false);
