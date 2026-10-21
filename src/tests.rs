@@ -736,6 +736,9 @@ fn a_rebuild_killed_mid_swap_is_finished_not_read_half_done() {
 /// wait closes needs a journal over 512 MiB — murail's ledger, where the
 /// knockout leaves the 557 MB journal behind — too slow for the gate.
 #[test]
+// Kept to ~5 MB: at 64 KB per event (77 MB) the test's own store was
+// dropped mid memtable rotation and hung in fjall's shutdown (peat-axn),
+// which this guard cannot outlast without the ledger's close watchdog.
 fn a_rebuild_leaves_only_the_active_journal() {
     use crate::db::{beside, journal_files, migrate_views};
     let dir = tmp();
@@ -748,7 +751,7 @@ fn a_rebuild_leaves_only_the_active_journal() {
                     DAY_MS + u64::from(i),
                     Event::ToolCall {
                         tool: "Bash".into(),
-                        detail: format!("{i}:{}", "x".repeat(64 << 10)),
+                        detail: format!("{i}:{}", "x".repeat(4 << 10)),
                         ok: true,
                     },
                 );
